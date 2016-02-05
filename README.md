@@ -6,7 +6,9 @@
 Requires golang >= 1.5.1
 
 go get -d github.com/facebook/fbtracert
+
 go install github.com/facebook/fbtracert
+
 $GOPATH/bin/fbtracert --help
 
 ## Full documentation
