@@ -1,0 +1,11 @@
+go_binary(
+    name = "fbtracert",
+    srcs = util.files("**/*.go"),
+    go_external_deps = [
+        ("github.com/golang/glog",
+         "d1c4472bf2efd3826f2b5bdcc02d8416798d678c"),
+        ("github.com/olekukonko/tablewriter",
+         "bc39950e081b457853031334b3c8b95cdfe428ba"),
+    ],
+    go_version = "1.5.1",
+)
