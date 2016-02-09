@@ -80,8 +80,8 @@ type Probe struct {
 	ttl     int
 }
 
-// IcmpResponse is emitted by ICMPReceiver
-type IcmpResponse struct {
+// ICMPResponse is emitted by ICMPReceiver
+type ICMPResponse struct {
 	Probe
 	fromAddr *net.IP
 	fromName string
@@ -281,7 +281,7 @@ func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 			ts := tcpHdr.SeqNum & 0x00ffffff
 			// scale the current time
 			now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff
-			recv <- IcmpResponse{Probe: Probe{srcPort: int(tcpHdr.Source), ttl: ttl}, fromAddr: &fromAddr, rtt: now - ts}
+			recv <- ICMPResponse{Probe: Probe{srcPort: int(tcpHdr.Source), ttl: ttl}, fromAddr: &fromAddr, rtt: now - ts}
 		}
 	}()
 
@@ -304,7 +304,7 @@ func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 	return out, nil
 }
 
-// Resolver resolves names in incoming IcmpResponse messages
+// Resolver resolves names in incoming ICMPResponse messages
 // Everything else is passed through as is
 func Resolver(input chan interface{}) (chan interface{}, error) {
 	out := make(chan interface{})
@@ -313,8 +313,8 @@ func Resolver(input chan interface{}) (chan interface{}, error) {
 
 		for val := range input {
 			switch val.(type) {
-			case IcmpResponse:
-				resp := val.(IcmpResponse)
+			case ICMPResponse:
+				resp := val.(ICMPResponse)
 				names, err := net.LookupAddr(resp.fromAddr.String())
 				if err != nil {
 					resp.fromName = "?"
@@ -330,7 +330,7 @@ func Resolver(input chan interface{}) (chan interface{}, error) {
 	return out, nil
 }
 
-//Sender generates TCP SYN packet probes with given TTL at given packet per second rate
+// Sender generates TCP SYN packet probes with given TTL at given packet per second rate
 // The packet descriptions are published to the output channel as Probe messages
 // As a side effect, the packets are injected into raw socket
 func Sender(done <-chan struct{}, srcAddr *net.IP, af, dest string, dstPort, baseSrcPort, maxSrcPorts, maxIters, ttl, pps, tos int) (chan interface{}, error) {
@@ -603,7 +603,7 @@ func main() {
 		senderDone[ttl-1] = make(chan struct{})
 		c, err := Sender(senderDone[ttl-1], source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue)
 		if err != nil {
-			glog.Fatalf("Failed to start sender for ttl %d, %s\n", ttl, err)
+			glog.Fatalf("Failed to start sender for ttl %d, %s\n -- are you running with the correct privileges?", ttl, err)
 			return
 		}
 		probes = append(probes, c)
@@ -678,8 +678,8 @@ func main() {
 	lastClosed := *maxTTL
 	for val := range merge(resolved...) {
 		switch val.(type) {
-		case IcmpResponse:
-			resp := val.(IcmpResponse)
+		case ICMPResponse:
+			resp := val.(ICMPResponse)
 			rcvd[resp.srcPort][resp.ttl-1]++
 			currName := hops[resp.srcPort][resp.ttl-1]
 			if currName != "?" && currName != resp.fromName {
