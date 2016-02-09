@@ -13,33 +13,33 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/golang/glog"
-	"github.com/olekukonko/tablewriter"
 	"math/rand"
 	"net"
 	"os"
-	"runtime"
 	"syscall"
 	"time"
+
+	"github.com/golang/glog"
+	"github.com/olekukonko/tablewriter"
 )
 
 //
 // Command line flags
 //
-var maxTtl *int = flag.Int("maxTtl", 30, "The maximum ttl to use")
-var minTtl *int = flag.Int("minTtl", 1, "The ttl to start at")
-var maxSrcPorts *int = flag.Int("maxSrcPorts", 256, "The maximum number of source ports to use")
-var maxTime *int = flag.Int("maxTime", 60, "The time to run the process for")
-var targetPort *int = flag.Int("targetPort", 22, "The target port to trace to")
-var probeRate *int = flag.Int("probeRate", 96, "The probe rate per ttl layer")
-var tosValue *int = flag.Int("tosValue", 140, "The TOS/TC to use in probes")
-var numResolvers *int = flag.Int("numResolvers", 32, "The number of DNS resolver goroutines")
-var addrFamily *string = flag.String("addrFamily", "ip4", "The address family (ip4/ip6) to use for testing")
-var maxColumns *int = flag.Int("maxColumns", 4, "Maximum number of columns in report tables")
-var showAll *bool = flag.Bool("showAll", false, "Show all paths, regardless of loss detection")
-var srcAddr *string = flag.String("srcAddr", "", "The source address for pings, default to auto-discover")
-var jsonOutput *bool = flag.Bool("jsonOutput", false, "Output raw JSON data")
-var baseSrcPort *int = flag.Int("baseSrcPort", 32768, "The base source port to start probing from")
+var maxTTL = flag.Int("maxTTL", 30, "The maximum ttl to use")
+var minTTL = flag.Int("minTTL", 1, "The ttl to start at")
+var maxSrcPorts = flag.Int("maxSrcPorts", 256, "The maximum number of source ports to use")
+var maxTime = flag.Int("maxTime", 60, "The time to run the process for")
+var targetPort = flag.Int("targetPort", 22, "The target port to trace to")
+var probeRate = flag.Int("probeRate", 96, "The probe rate per ttl layer")
+var tosValue = flag.Int("tosValue", 140, "The TOS/TC to use in probes")
+var numResolvers = flag.Int("numResolvers", 32, "The number of DNS resolver goroutines")
+var addrFamily = flag.String("addrFamily", "ip4", "The address family (ip4/ip6) to use for testing")
+var maxColumns = flag.Int("maxColumns", 4, "Maximum number of columns in report tables")
+var showAll = flag.Bool("showAll", false, "Show all paths, regardless of loss detection")
+var srcAddr = flag.String("srcAddr", "", "The source address for pings, default to auto-discover")
+var jsonOutput = flag.Bool("jsonOutput", false, "Output raw JSON data")
+var baseSrcPort = flag.Int("baseSrcPort", 32768, "The base source port to start probing from")
 
 //
 // Discover the source address for pinging
@@ -68,25 +68,19 @@ func getSourceAddr(af string, srcAddr string) (*net.IP, error) {
 	return nil, fmt.Errorf("Could not find a source address in af %s", af)
 }
 
-//
 // Resolve given hostname/address in the given address family
-//
 func resolveName(dest string, af string) (*net.IP, error) {
 	addr, err := net.ResolveIPAddr(af, dest)
 	return &addr.IP, err
 }
 
-//
-// Probe specification, emitted by sender
-//
+// Probe is emitted by sender
 type Probe struct {
 	srcPort int
 	ttl     int
 }
 
-//
-// Emitted by IcmpReceiver
-//
+// IcmpResponse is emitted by ICMPReceiver
 type IcmpResponse struct {
 	Probe
 	fromAddr *net.IP
@@ -94,24 +88,20 @@ type IcmpResponse struct {
 	rtt      uint32
 }
 
-//
-// Emitted by TcpReceiver
-//
-type TcpResponse struct {
+// TCPResponse is emitted by TCPReceiver
+type TCPResponse struct {
 	Probe
 	rtt uint32
 }
 
-//
-// Feed on TCP RST messages we receive from the end host; we use lots of parameters to check if the incoming packet
-// is actually a response to our probe. We create TcpResponse structs and emit them on the output channel
-//
-func TcpReceiver(done <-chan struct{}, af string, targetAddr string, probePortStart, probePortEnd, targetPort, maxTtl int) (chan interface{}, error) {
+// TCPReceiver Feeds on TCP RST messages we receive from the end host; we use lots of parameters to check if the incoming packet
+// is actually a response to our probe. We create TCPResponse structs and emit them on the output channel
+func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortStart, probePortEnd, targetPort, maxTTL int) (chan interface{}, error) {
 	var recvSocket int
 	var err error
 	var ipHdrSize int
 
-	glog.V(2).Infoln("TcpReceiver starting...")
+	glog.V(2).Infoln("TCPReceiver starting...")
 
 	// create the socket
 	switch {
@@ -131,11 +121,11 @@ func TcpReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 		return nil, err
 	}
 
-	// we'll be writing the TcpResponse structs to this channel
+	// we'll be writing the TCPResponse structs to this channel
 	out := make(chan interface{})
 
 	// IP + TCP header, this channel is fed from the socket
-	recv := make(chan TcpResponse)
+	recv := make(chan TCPResponse)
 	go func() {
 		const tcpHdrSize int = 20
 		packet := make([]byte, ipHdrSize+tcpHdrSize)
@@ -153,7 +143,7 @@ func TcpReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 			}
 
 			// is that from the target port we expect?
-			tcpHdr := parseTcpHeader(packet[ipHdrSize:n])
+			tcpHdr := parseTCPHeader(packet[ipHdrSize:n])
 			if int(tcpHdr.Source) != targetPort {
 				continue
 			}
@@ -181,7 +171,7 @@ func TcpReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 			ackNum := tcpHdr.AckNum - 1
 			ttl := int(ackNum >> 24)
 
-			if ttl > maxTtl || ttl < 1 {
+			if ttl > maxTTL || ttl < 1 {
 				continue
 			}
 
@@ -195,7 +185,7 @@ func TcpReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 				continue
 			}
 
-			recv <- TcpResponse{Probe: Probe{srcPort: int(tcpHdr.Destination), ttl: ttl}, rtt: now - ts}
+			recv <- TCPResponse{Probe: Probe{srcPort: int(tcpHdr.Destination), ttl: ttl}, rtt: now - ts}
 		}
 	}()
 
@@ -207,7 +197,7 @@ func TcpReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 			case response := <-recv:
 				out <- response
 			case <-done:
-				glog.V(2).Infoln("TcpReceiver terminating...")
+				glog.V(2).Infoln("TCPReceiver terminating...")
 				return
 			}
 		}
@@ -216,14 +206,12 @@ func TcpReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 	return out, nil
 }
 
-//
-// This runs on its own collecting Icmp responses until its explicitly told to stop
-//
-func IcmpReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
+// ICMPReceiver runs on its own collecting Icmp responses until its explicitly told to stop
+func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 	var recvSocket int
 	var err error
-	var outerIpHdrSize int
-	var innerIpHdrSize int
+	var outerIPHdrSize int
+	var innerIPHdrSize int
 	var icmpMsgType byte
 
 	const (
@@ -235,17 +223,17 @@ func IcmpReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 	case af == "ip4":
 		recvSocket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_ICMP)
 		// IPv4 raw socket always prepend the transport IPv4 header
-		outerIpHdrSize = 20
+		outerIPHdrSize = 20
 		// the size of the original IPv4 header that was on the TCP packet sent out
-		innerIpHdrSize = 20
+		innerIPHdrSize = 20
 		// hardcoded: time to live exceeded
 		icmpMsgType = 11
 	case af == "ip6":
 		recvSocket, err = syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_ICMPV6)
 		// IPv6 raw socket does not prepend the original transport IPv6 header
-		outerIpHdrSize = 0
+		outerIPHdrSize = 0
 		// this is the size of IPv6 header of the original TCP packet we used in the probes
-		innerIpHdrSize = 40
+		innerIPHdrSize = 40
 		// time to live exceeded
 		icmpMsgType = 3
 	}
@@ -254,28 +242,28 @@ func IcmpReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 		return nil, err
 	}
 
-	glog.V(2).Infoln("IcmpReceiver is starting...")
+	glog.V(2).Infoln("ICMPReceiver is starting...")
 
 	recv := make(chan interface{})
 
 	go func() {
 		// TODO: remove hardcode; 20 bytes for IP header, 8 bytes for ICMP header, 8 bytes for TCP header
-		packet := make([]byte, outerIpHdrSize+icmpHdrSize+innerIpHdrSize+tcpHdrSize)
+		packet := make([]byte, outerIPHdrSize+icmpHdrSize+innerIPHdrSize+tcpHdrSize)
 		for {
 			n, from, err := syscall.Recvfrom(recvSocket, packet, 0)
 			if err != nil {
 				break
 			}
 			// extract the 8 bytes of the original TCP header
-			if n < outerIpHdrSize+icmpHdrSize+innerIpHdrSize+tcpHdrSize {
+			if n < outerIPHdrSize+icmpHdrSize+innerIPHdrSize+tcpHdrSize {
 				continue
 			}
 			// not ttl exceeded
-			if packet[outerIpHdrSize] != icmpMsgType || packet[outerIpHdrSize+1] != 0 {
+			if packet[outerIPHdrSize] != icmpMsgType || packet[outerIPHdrSize+1] != 0 {
 				continue
 			}
 			glog.V(4).Infof("Received icmp response message %d: %x\n", len(packet), packet)
-			tcpHdr := parseTcpHeader(packet[outerIpHdrSize+icmpHdrSize+innerIpHdrSize : n])
+			tcpHdr := parseTCPHeader(packet[outerIPHdrSize+icmpHdrSize+innerIPHdrSize : n])
 
 			var fromAddr net.IP
 
@@ -307,7 +295,7 @@ func IcmpReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 			case response := <-recv:
 				out <- response
 			case <-done:
-				glog.V(2).Infoln("IcmpReceiver done")
+				glog.V(2).Infoln("ICMPReceiver done")
 				return
 			}
 		}
@@ -316,10 +304,8 @@ func IcmpReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 	return out, nil
 }
 
-//
-// Resolve names in incoming IcmpResponse messages
+// Resolver resolves names in incoming IcmpResponse messages
 // Everything else is passed through as is
-//
 func Resolver(input chan interface{}) (chan interface{}, error) {
 	out := make(chan interface{})
 	go func() {
@@ -344,11 +330,9 @@ func Resolver(input chan interface{}) (chan interface{}, error) {
 	return out, nil
 }
 
-//
-// Generate TCP SYN packet probes with given TTL at given packet per second rate
+//Sender generates TCP SYN packet probes with given TTL at given packet per second rate
 // The packet descriptions are published to the output channel as Probe messages
 // As a side effect, the packets are injected into raw socket
-//
 func Sender(done <-chan struct{}, srcAddr *net.IP, af, dest string, dstPort, baseSrcPort, maxSrcPorts, maxIters, ttl, pps, tos int) (chan interface{}, error) {
 	var err error
 
@@ -427,7 +411,7 @@ func Sender(done <-chan struct{}, srcAddr *net.IP, af, dest string, dstPort, bas
 			probe := Probe{srcPort: srcPort, ttl: ttl}
 			now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff
 			seqNum := ((uint32(ttl) & 0xff) << 24) | (now & 0x00ffffff)
-			packet := makeTcpHeader(af, srcAddr, dstAddr, srcPort, dstPort, seqNum)
+			packet := makeTCPHeader(af, srcAddr, dstAddr, srcPort, dstPort, seqNum)
 
 			switch {
 			case af == "ip4":
@@ -510,16 +494,16 @@ func isLossy(hitRates []float64) bool {
 //
 // print the paths reported as having losses
 //
-func printLossyPaths(sent, rcvd map[int] /* src port */ []int, hops map[int] /* src port */ []string, maxColumns, maxTtl int) {
+func printLossyPaths(sent, rcvd map[int] /* src port */ []int, hops map[int] /* src port */ []string, maxColumns, maxTTL int) {
 	var allPorts []int
 
-	for srcPort, _ := range hops {
+	for srcPort := range hops {
 		allPorts = append(allPorts, srcPort)
 	}
 
 	// split in multiple tables to fit the columns on the screen
 	for i := 0; i < len(allPorts)/maxColumns; i++ {
-		data := make([][]string, maxTtl)
+		data := make([][]string, maxTTL)
 		table := tablewriter.NewWriter(os.Stdout)
 		header := []string{"TTL"}
 
@@ -534,7 +518,7 @@ func printLossyPaths(sent, rcvd map[int] /* src port */ []int, hops map[int] /* 
 
 		table.SetHeader(header)
 
-		for ttl := 0; ttl < maxTtl-1; ttl++ {
+		for ttl := 0; ttl < maxTTL-1; ttl++ {
 			data[ttl] = make([]string, 2*(maxOffset-i*maxColumns)+1)
 			data[ttl][0] = fmt.Sprintf("%d", ttl+1)
 			for j, srcPort := range allPorts[i*maxColumns : maxOffset] {
@@ -552,9 +536,7 @@ func printLossyPaths(sent, rcvd map[int] /* src port */ []int, hops map[int] /* 
 	}
 }
 
-//
-// Define a JSON report from go/fbtracert
-//
+// Report defines a JSON report from go/fbtracert
 type Report struct {
 	// The path map
 	Paths map[string] /* srcPort */ []string /* path hops */
@@ -575,7 +557,7 @@ func newReport() (report Report) {
 //
 // Raw Json output for external program to analyze
 //
-func printLossyPathsJson(sent, rcvd map[int] /* src port */ []int, hops map[int] /* src port */ []string, maxTtl int) {
+func printLossyPathsJSON(sent, rcvd map[int] /* src port */ []int, hops map[int] /* src port */ []string, maxTTL int) {
 	var report = newReport()
 
 	for srcPort, path := range hops {
@@ -593,8 +575,6 @@ func printLossyPathsJson(sent, rcvd map[int] /* src port */ []int, hops map[int]
 }
 
 func main() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
-
 	flag.Parse()
 	target := flag.Arg(0)
 
@@ -618,8 +598,8 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Use '-logtostderr=true' cmd line option to see GLOG output\n")
 
 	// this will catch senders quitting - we have one sender per ttl
-	senderDone := make([]chan struct{}, *maxTtl)
-	for ttl := *minTtl; ttl <= *maxTtl; ttl++ {
+	senderDone := make([]chan struct{}, *maxTTL)
+	for ttl := *minTTL; ttl <= *maxTTL; ttl++ {
 		senderDone[ttl-1] = make(chan struct{})
 		c, err := Sender(senderDone[ttl-1], source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue)
 		if err != nil {
@@ -633,14 +613,14 @@ func main() {
 	recvDone := make(chan struct{})
 
 	// collect icmp unreachable messages for our probes
-	icmpResp, err := IcmpReceiver(recvDone, *addrFamily)
+	icmpResp, err := ICMPReceiver(recvDone, *addrFamily)
 	if err != nil {
 		return
 	}
 
 	// collect TCP RST's from the target
 	targetAddr, err := resolveName(target, *addrFamily)
-	tcpResp, err := TcpReceiver(recvDone, *addrFamily, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTtl)
+	tcpResp, err := TCPReceiver(recvDone, *addrFamily, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTTL)
 	if err != nil {
 		return
 	}
@@ -665,12 +645,12 @@ func main() {
 	hops := make(map[int] /*src Port */ []string /* hop name */)
 
 	for srcPort := *baseSrcPort; srcPort < *baseSrcPort+*maxSrcPorts; srcPort++ {
-		sent[srcPort] = make([]int, *maxTtl)
-		rcvd[srcPort] = make([]int, *maxTtl)
-		hops[srcPort] = make([]string, *maxTtl)
-		//hops[srcPort][*maxTtl-1] = target
+		sent[srcPort] = make([]int, *maxTTL)
+		rcvd[srcPort] = make([]int, *maxTTL)
+		hops[srcPort] = make([]string, *maxTTL)
+		//hops[srcPort][*maxTTL-1] = target
 
-		for i := 0; i < *maxTtl; i++ {
+		for i := 0; i < *maxTTL; i++ {
 			hops[srcPort][i] = "?"
 		}
 	}
@@ -693,9 +673,9 @@ func main() {
 	var names []string
 
 	// src ports that changed their paths in process of tracing
-	var flappedPorts map[int]bool = make(map[int]bool)
+	var flappedPorts = make(map[int]bool)
 
-	lastClosed := *maxTtl
+	lastClosed := *maxTTL
 	for val := range merge(resolved...) {
 		switch val.(type) {
 		case IcmpResponse:
@@ -711,8 +691,8 @@ func main() {
 			// XXX: we may have duplicates, which is OK,
 			// but not very efficient
 			names = append(names, resp.fromName)
-		case TcpResponse:
-			resp := val.(TcpResponse)
+		case TCPResponse:
+			resp := val.(TCPResponse)
 			// stop all senders sending above this ttl, since they are not needed
 			// XXX: this is not always optimal, i.e. we may receive TCP RST for
 			// a port mapped to a short WAN path, and it would tell us to terminate
@@ -733,7 +713,7 @@ func main() {
 	for srcPort, hopVector := range hops {
 		for i := range hopVector {
 			// truncate lists once we hit the target name
-			if hopVector[i] == target && i < *maxTtl-1 {
+			if hopVector[i] == target && i < *maxTTL-1 {
 				sent[srcPort] = sent[srcPort][:i+1]
 				rcvd[srcPort] = rcvd[srcPort][:i+1]
 				hopVector = hopVector[:i+1]
@@ -779,7 +759,7 @@ func main() {
 
 	if len(lossyPathHops) > 0 {
 		if *jsonOutput {
-			printLossyPathsJson(lossyPathSent, lossyPathRcvd, lossyPathHops, lastClosed+1)
+			printLossyPathsJSON(lossyPathSent, lossyPathRcvd, lossyPathHops, lastClosed+1)
 		} else {
 			printLossyPaths(lossyPathSent, lossyPathRcvd, lossyPathHops, *maxColumns, lastClosed+1)
 		}
