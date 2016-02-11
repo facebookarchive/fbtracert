@@ -596,6 +596,10 @@ func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	flag.Parse()
+	if flag.Arg(0) == "" {
+		fmt.Fprintf(os.Stderr, "Must specify a target\n")
+		return
+	}
 	target := flag.Arg(0)
 
 	var probes []chan interface{}
