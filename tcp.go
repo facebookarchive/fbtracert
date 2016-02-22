@@ -27,10 +27,8 @@ const (
 	URG = 1 << 5
 )
 
-//
-// Define the TCP header struct
-//
-type TcpHeader struct {
+// TCPHeader defines the TCP header struct
+type TCPHeader struct {
 	Source      uint16
 	Destination uint16
 	SeqNum      uint32
@@ -46,8 +44,8 @@ type TcpHeader struct {
 //
 // create & serialize a TCP header, compute and fill in the checksum (v4/v6)
 //
-func makeTcpHeader(af string, srcAddr, dstAddr *net.IP, srcPort, dstPort int, ts uint32) []byte {
-	tcpHeader := TcpHeader{
+func makeTCPHeader(af string, srcAddr, dstAddr *net.IP, srcPort, dstPort int, ts uint32) []byte {
+	TCPHeader := TCPHeader{
 		Source:      uint16(srcPort), // Random ephemeral port
 		Destination: uint16(dstPort),
 		SeqNum:      ts,
@@ -61,15 +59,15 @@ func makeTcpHeader(af string, srcAddr, dstAddr *net.IP, srcPort, dstPort int, ts
 	}
 
 	// temporary bytes for checksum
-	bytes := tcpHeader.Serialize()
-	tcpHeader.Checksum = tcpChecksum(af, bytes, srcAddr, dstAddr)
+	bytes := TCPHeader.Serialize()
+	TCPHeader.Checksum = tcpChecksum(af, bytes, srcAddr, dstAddr)
 
-	return tcpHeader.Serialize()
+	return TCPHeader.Serialize()
 }
 
-// Parse packet into TcpHeader structure
-func parseTcpHeader(data []byte) *TcpHeader {
-	var tcp TcpHeader
+// Parse packet into TCPHeader structure
+func parseTCPHeader(data []byte) *TCPHeader {
+	var tcp TCPHeader
 
 	r := bytes.NewReader(data)
 
@@ -96,10 +94,8 @@ func parseTcpHeader(data []byte) *TcpHeader {
 	return &tcp
 }
 
-//
-// Emit raw bytes for the header
-//
-func (tcp *TcpHeader) Serialize() []byte {
+// Serialize emits raw bytes for the header
+func (tcp *TCPHeader) Serialize() []byte {
 
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.BigEndian, tcp.Source)
