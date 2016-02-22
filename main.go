@@ -291,7 +291,7 @@ func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 		defer close(out)
 		for {
 			select {
-			// read Icmp struct
+			// read ICMP struct
 			case response := <-recv:
 				out <- response
 			case <-done:
