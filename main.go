@@ -206,7 +206,7 @@ func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 	return out, nil
 }
 
-// ICMPReceiver runs on its own collecting Icmp responses until its explicitly told to stop
+// ICMPReceiver runs on its own collecting ICMP responses until its explicitly told to stop
 func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 	var recvSocket int
 	var err error
@@ -262,7 +262,7 @@ func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 			if packet[outerIPHdrSize] != icmpMsgType || packet[outerIPHdrSize+1] != 0 {
 				continue
 			}
-			glog.V(4).Infof("Received icmp response message %d: %x\n", len(packet), packet)
+			glog.V(4).Infof("Received ICMP response message %d: %x\n", len(packet), packet)
 			tcpHdr := parseTCPHeader(packet[outerIPHdrSize+icmpHdrSize+innerIPHdrSize : n])
 
 			var fromAddr net.IP
@@ -616,7 +616,7 @@ func main() {
 	// channel to tell receivers to stop
 	recvDone := make(chan struct{})
 
-	// collect icmp unreachable messages for our probes
+	// collect ICMP unreachable messages for our probes
 	icmpResp, err := ICMPReceiver(recvDone, *addrFamily)
 	if err != nil {
 		return
