@@ -610,7 +610,10 @@ func main() {
 		senderDone[ttl-1] = make(chan struct{})
 		c, err := Sender(senderDone[ttl-1], source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue)
 		if err != nil {
-			glog.Fatalf("Failed to start sender for ttl %d, %s\n -- are you running with the correct privileges?", ttl, err)
+			glog.Errorf("Failed to start sender for ttl %d, %s", ttl, err);
+			if err.Error() == "operation not permitted" {
+				glog.Error(" -- are you running with the correct privileges?")
+			}
 			return
 		}
 		probes = append(probes, c)
