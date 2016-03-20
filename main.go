@@ -71,7 +71,10 @@ func getSourceAddr(af string, srcAddr string) (*net.IP, error) {
 // Resolve given hostname/address in the given address family
 func resolveName(dest string, af string) (*net.IP, error) {
 	addr, err := net.ResolveIPAddr(af, dest)
-	return &addr.IP, err
+	if err != nil {
+		return nil, err
+	}
+	return &addr.IP, nil
 }
 
 // Probe is emitted by sender
