@@ -1,15 +1,18 @@
 # fbtracert
-(pronounced ef-BEE-tracerTEE) 
+> pronounced: ef-BEE-tracerTEE
 
 ## Installing
 
-Requires golang >= 1.5.1
+Requires golang >= 1.5.1:
 
+```bash
 go get -d github.com/facebook/fbtracert
-
 go install github.com/facebook/fbtracert
+```
 
+```bash
 $GOPATH/bin/fbtracert --help
+```
 
 ## Full documentation
 
