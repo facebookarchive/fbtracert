@@ -320,7 +320,7 @@ func Resolver(input chan interface{}) (chan interface{}, error) {
 				resp := val.(ICMPResponse)
 				names, err := net.LookupAddr(resp.fromAddr.String())
 				if err != nil {
-					resp.fromName = "?"
+					resp.fromName = resp.fromAddr.String()
 				} else {
 					resp.fromName = names[0]
 				}
