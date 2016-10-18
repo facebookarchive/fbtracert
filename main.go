@@ -49,19 +49,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Must specify a target\n")
 		return
 	}
-	target := flag.Arg(0)
-
-	var probes []chan interface{}
 
 	numIters := int(*maxTime * *probeRate / *maxSrcPorts)
-
 	if numIters <= 1 {
 		fmt.Fprintf(os.Stderr, "Number of iterations too low, increase probe rate / run time or decrease src port range...\n")
 		return
 	}
 
 	source, err := getSourceAddr(*addrFamily, *srcAddr)
-
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Could not identify a source address to trace from\n")
 		return
@@ -72,8 +67,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Use '-logtostderr=true' cmd line option to see GLOG output\n")
 	}
 
-	// this will catch senders quitting - we have one sender per ttl
-	senderDone := make([]chan struct{}, *maxTTL)
+	// Start Senders
+	target := flag.Arg(0)
+	senderDone := make([]chan struct{}, *maxTTL) // this will catch senders quitting - we have one sender per ttl
+	var probes []chan interface{}
 	for ttl := *minTTL; ttl <= *maxTTL; ttl++ {
 		senderDone[ttl-1] = make(chan struct{})
 		c, err := Sender(senderDone[ttl-1], source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue)
@@ -87,10 +84,8 @@ func main() {
 		probes = append(probes, c)
 	}
 
-	// channel to tell receivers to stop
-	recvDone := make(chan struct{})
-
 	// collect ICMP unreachable messages for our probes
+	recvDone := make(chan struct{}) // channel to tell receivers to stop
 	icmpResp, err := ICMPReceiver(recvDone, *addrFamily)
 	if err != nil {
 		return
