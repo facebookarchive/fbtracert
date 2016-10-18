@@ -68,7 +68,9 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "Starting fbtracert with %d probes per second/ttl, base src port %d and with the port span of %d\n", *probeRate, *baseSrcPort, *maxSrcPorts)
-	fmt.Fprintf(os.Stderr, "Use '-logtostderr=true' cmd line option to see GLOG output\n")
+	if flag.Lookup("logtostderr").Value.String() == "false" {
+		fmt.Fprintf(os.Stderr, "Use '-logtostderr=true' cmd line option to see GLOG output\n")
+	}
 
 	// this will catch senders quitting - we have one sender per ttl
 	senderDone := make([]chan struct{}, *maxTTL)
