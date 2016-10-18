@@ -100,6 +100,7 @@ func main() {
 	recvDone := make(chan struct{}) // channel to tell receivers to stop
 	icmpResp, err := ICMPReceiver(recvDone, source, *addrFamily)
 	if err != nil {
+		glog.Errorf("Failed to start ICMP receiver, %s", err)
 		return
 	}
 
@@ -118,6 +119,7 @@ func main() {
 	targetAddr, err := resolveName(target, *addrFamily)
 	tcpResp, err := TCPReceiver(recvDone, source, *addrFamily, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTTL)
 	if err != nil {
+		glog.Errorf("Failed to start TCP receiver, %s", err)
 		return
 	}
 
