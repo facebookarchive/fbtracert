@@ -10,6 +10,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -74,11 +75,14 @@ func main() {
 
 	// Start Senders
 	target := flag.Arg(0)
-	senderDone := make([]chan struct{}, *maxTTL) // this will catch senders quitting - we have one sender per ttl
-	var probes []chan interface{}
+	var senderWG sync.WaitGroup
+	senderWG.Add(*maxTTL)
+	probes := make(chan Probe)
+	ctx := context.Background()
+	senderCancels := make(map[int]context.CancelFunc)
 	for ttl := *minTTL; ttl <= *maxTTL; ttl++ {
-		senderDone[ttl-1] = make(chan struct{})
-		c, err := Sender(senderDone[ttl-1], source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue)
+		ctx, senderCancels[ttl] = context.WithCancel(ctx)
+		err := Sender(ctx, &senderWG, source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue, probes)
 		if err != nil {
 			glog.Errorf("Failed to start sender for ttl %d, %s", ttl, err)
 			if err.Error() == "operation not permitted" {
@@ -86,8 +90,11 @@ func main() {
 			}
 			return
 		}
-		probes = append(probes, c)
 	}
+	go func() {
+		senderWG.Wait()
+		close(probes)
+	}()
 
 	// collect ICMP unreachable messages for our probes
 	recvDone := make(chan struct{}) // channel to tell receivers to stop
@@ -114,18 +121,6 @@ func main() {
 		return
 	}
 
-	// add DNS name resolvers to the mix
-	var resolved []chan interface{}
-	unresolved := merge(tcpResp, icmpResp)
-
-	for i := 0; i < *numResolvers; i++ {
-		c, err := Resolver(unresolved)
-		if err != nil {
-			return
-		}
-		resolved = append(resolved, c)
-	}
-
 	// maps that store various counters per source port/ttl
 	// e..g sent, for every soruce port, contains vector
 	// of sent packets for each TTL
@@ -147,8 +142,7 @@ func main() {
 	// collect all probe specs emitted by senders
 	// once all senders terminate, tell receivers to quit too
 	go func() {
-		for val := range merge(probes...) {
-			probe := val.(Probe)
+		for probe := range probes {
 			sent[probe.srcPort][probe.ttl-1]++
 		}
 		glog.V(2).Infoln("All senders finished!")
@@ -194,9 +188,7 @@ receiveLoop:
 			// a port mapped to a short WAN path, and it would tell us to terminate
 			// probing at higher TTL, thus cutting visibility on "long" paths
 			// however, this mostly concerned that last few hops...
-			for i := resp.ttl; i < lastClosed; i++ {
-				close(senderDone[i])
-			}
+			senderCancels[resp.ttl]()
 			// update the last closed ttl, so we don't double-close the channels
 			if resp.ttl < lastClosed {
 				lastClosed = resp.ttl
@@ -497,49 +489,45 @@ func Resolver(wg *sync.WaitGroup, input <-chan ICMPResponse, out chan<- ICMPResp
 // Sender generates TCP SYN packet probes with given TTL at given packet per second rate
 // The packet descriptions are published to the output channel as Probe messages
 // As a side effect, the packets are injected into raw socket
-func Sender(done <-chan struct{}, srcAddr *net.IP, af, dest string, dstPort, baseSrcPort, maxSrcPorts, maxIters, ttl, pps, tos int) (chan interface{}, error) {
-	var err error
-
-	out := make(chan interface{})
-
+func Sender(ctx context.Context, wg *sync.WaitGroup, srcAddr *net.IP, af, dest string, dstPort, baseSrcPort, maxSrcPorts, maxIters, ttl, pps, tos int, out chan<- Probe) error {
 	glog.V(2).Infof("Sender for ttl %d starting\n", ttl)
 
 	dstAddr, err := resolveName(dest, af)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	conn, err := net.ListenPacket(af+":6", srcAddr.String())
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	switch af {
 	case "ip4":
 		conn := ipv4.NewPacketConn(conn)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := conn.SetTTL(ttl); err != nil {
-			return nil, err
+			return err
 		}
 		if err := conn.SetTOS(tos); err != nil {
-			return nil, err
+			return err
 		}
 	case "ip6":
 		conn := ipv6.NewPacketConn(conn)
 		if err := conn.SetHopLimit(ttl); err != nil {
-			return nil, err
+			return err
 		}
 		if err := conn.SetTrafficClass(tos); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	// spawn a new goroutine and return the channel to be used for reading
 	go func() {
 		defer conn.Close()
-		defer close(out)
+		defer wg.Done()
 
 		delay := time.Duration(1000/pps) * time.Millisecond
 
@@ -563,7 +551,7 @@ func Sender(done <-chan struct{}, srcAddr *net.IP, af, dest string, dstPort, bas
 				if end.Sub(start) < delay+jitter {
 					time.Sleep(delay + jitter - (end.Sub(start)))
 				}
-			case <-done:
+			case <-ctx.Done():
 				glog.V(2).Infof("Sender for ttl %d exiting prematurely\n", ttl)
 				return
 			}
@@ -571,7 +559,7 @@ func Sender(done <-chan struct{}, srcAddr *net.IP, af, dest string, dstPort, bas
 		glog.V(2).Infoln("Sender done")
 	}()
 
-	return out, nil
+	return nil
 }
 
 //
