@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"golang.org/x/net/icmp"
@@ -95,6 +96,17 @@ func main() {
 		return
 	}
 
+	var resolveWG sync.WaitGroup
+	resolveWG.Add(*numResolvers)
+	resolvedICMP := make(chan ICMPResponse)
+	for i := 0; i < *numResolvers; i++ {
+		go Resolver(&resolveWG, icmpResp, resolvedICMP)
+	}
+	go func() {
+		resolveWG.Wait()
+		close(resolvedICMP)
+	}()
+
 	// collect TCP RST's from the target
 	targetAddr, err := resolveName(target, *addrFamily)
 	tcpResp, err := TCPReceiver(recvDone, source, *addrFamily, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTTL)
@@ -153,10 +165,14 @@ func main() {
 	var flappedPorts = make(map[int]bool)
 
 	lastClosed := *maxTTL
-	for val := range merge(resolved...) {
-		switch val.(type) {
-		case ICMPResponse:
-			resp := val.(ICMPResponse)
+receiveLoop:
+	for {
+		select {
+		case resp, ok := <-resolvedICMP:
+			if !ok {
+				resolvedICMP = nil
+				continue
+			}
 			rcvd[resp.srcPort][resp.ttl-1]++
 			currName := hops[resp.srcPort][resp.ttl-1]
 			if currName != "?" && currName != resp.fromName {
@@ -168,8 +184,11 @@ func main() {
 			// XXX: we may have duplicates, which is OK,
 			// but not very efficient
 			names = append(names, resp.fromName)
-		case TCPResponse:
-			resp := val.(TCPResponse)
+		case resp, ok := <-tcpResp:
+			if !ok {
+				tcpResp = nil
+				continue
+			}
 			// stop all senders sending above this ttl, since they are not needed
 			// XXX: this is not always optimal, i.e. we may receive TCP RST for
 			// a port mapped to a short WAN path, and it would tell us to terminate
@@ -184,6 +203,10 @@ func main() {
 			}
 			rcvd[resp.srcPort][resp.ttl-1]++
 			hops[resp.srcPort][resp.ttl-1] = target
+		default:
+			if resolvedICMP == nil && tcpResp == nil {
+				break receiveLoop
+			}
 		}
 	}
 
@@ -303,7 +326,7 @@ type TCPResponse struct {
 
 // TCPReceiver Feeds on TCP RST messages we receive from the end host; we use lots of parameters to check if the incoming packet
 // is actually a response to our probe. We create TCPResponse structs and emit them on the output channel
-func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr string, probePortStart, probePortEnd, targetPort, maxTTL int) (chan interface{}, error) {
+func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr string, probePortStart, probePortEnd, targetPort, maxTTL int) (chan TCPResponse, error) {
 
 	glog.V(2).Infoln("TCPReceiver starting...")
 
@@ -313,7 +336,7 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 	}
 
 	// we'll be writing the TCPResponse structs to this channel
-	out := make(chan interface{})
+	out := make(chan TCPResponse)
 
 	go func() {
 		const tcpHdrSize int = 20
@@ -387,7 +410,7 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 }
 
 // ICMPReceiver runs on its own collecting ICMP responses until its explicitly told to stop
-func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan interface{}, error) {
+func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPResponse, error) {
 	const (
 		icmpHdrSize int = 8
 		tcpHdrSize  int = 8
@@ -414,7 +437,7 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan interf
 
 	glog.V(2).Infoln("ICMPReceiver is starting...")
 
-	out := make(chan interface{})
+	out := make(chan ICMPResponse)
 
 	go func() {
 		defer conn.Close()
@@ -459,28 +482,16 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan interf
 
 // Resolver resolves names in incoming ICMPResponse messages
 // Everything else is passed through as is
-func Resolver(input chan interface{}) (chan interface{}, error) {
-	out := make(chan interface{})
-	go func() {
-		defer close(out)
-
-		for val := range input {
-			switch val.(type) {
-			case ICMPResponse:
-				resp := val.(ICMPResponse)
-				names, err := net.LookupAddr(resp.fromAddr.String())
-				if err != nil {
-					resp.fromName = resp.fromAddr.String()
-				} else {
-					resp.fromName = names[0]
-				}
-				out <- resp
-			default:
-				out <- val
-			}
+func Resolver(wg *sync.WaitGroup, input <-chan ICMPResponse, out chan<- ICMPResponse) {
+	defer wg.Done()
+	for val := range input {
+		val.fromName = val.fromAddr.String()
+		names, err := net.LookupAddr(val.fromAddr.String())
+		if err == nil {
+			val.fromName = names[0]
 		}
-	}()
-	return out, nil
+		out <- val
+	}
 }
 
 // Sender generates TCP SYN packet probes with given TTL at given packet per second rate
