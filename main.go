@@ -26,20 +26,223 @@ import (
 //
 // Command line flags
 //
-var maxTTL = flag.Int("maxTTL", 30, "The maximum ttl to use")
-var minTTL = flag.Int("minTTL", 1, "The ttl to start at")
-var maxSrcPorts = flag.Int("maxSrcPorts", 256, "The maximum number of source ports to use")
-var maxTime = flag.Int("maxTime", 60, "The time to run the process for")
-var targetPort = flag.Int("targetPort", 22, "The target port to trace to")
-var probeRate = flag.Int("probeRate", 96, "The probe rate per ttl layer")
-var tosValue = flag.Int("tosValue", 140, "The TOS/TC to use in probes")
-var numResolvers = flag.Int("numResolvers", 32, "The number of DNS resolver goroutines")
-var addrFamily = flag.String("addrFamily", "ip4", "The address family (ip4/ip6) to use for testing")
-var maxColumns = flag.Int("maxColumns", 4, "Maximum number of columns in report tables")
-var showAll = flag.Bool("showAll", false, "Show all paths, regardless of loss detection")
-var srcAddr = flag.String("srcAddr", "", "The source address for pings, default to auto-discover")
-var jsonOutput = flag.Bool("jsonOutput", false, "Output raw JSON data")
-var baseSrcPort = flag.Int("baseSrcPort", 32768, "The base source port to start probing from")
+
+func main() {
+	var (
+		maxTTL       = flag.Int("maxTTL", 30, "The maximum ttl to use")
+		minTTL       = flag.Int("minTTL", 1, "The ttl to start at")
+		maxSrcPorts  = flag.Int("maxSrcPorts", 256, "The maximum number of source ports to use")
+		maxTime      = flag.Int("maxTime", 60, "The time to run the process for")
+		targetPort   = flag.Int("targetPort", 22, "The target port to trace to")
+		probeRate    = flag.Int("probeRate", 96, "The probe rate per ttl layer")
+		tosValue     = flag.Int("tosValue", 140, "The TOS/TC to use in probes")
+		numResolvers = flag.Int("numResolvers", 32, "The number of DNS resolver goroutines")
+		addrFamily   = flag.String("addrFamily", "ip4", "The address family (ip4/ip6) to use for testing")
+		maxColumns   = flag.Int("maxColumns", 4, "Maximum number of columns in report tables")
+		showAll      = flag.Bool("showAll", false, "Show all paths, regardless of loss detection")
+		srcAddr      = flag.String("srcAddr", "", "The source address for pings, default to auto-discover")
+		jsonOutput   = flag.Bool("jsonOutput", false, "Output raw JSON data")
+		baseSrcPort  = flag.Int("baseSrcPort", 32768, "The base source port to start probing from")
+	)
+	flag.Parse()
+	if flag.Arg(0) == "" {
+		fmt.Fprintf(os.Stderr, "Must specify a target\n")
+		return
+	}
+	target := flag.Arg(0)
+
+	var probes []chan interface{}
+
+	numIters := int(*maxTime * *probeRate / *maxSrcPorts)
+
+	if numIters <= 1 {
+		fmt.Fprintf(os.Stderr, "Number of iterations too low, increase probe rate / run time or decrease src port range...\n")
+		return
+	}
+
+	source, err := getSourceAddr(*addrFamily, *srcAddr)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Could not identify a source address to trace from\n")
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "Starting fbtracert with %d probes per second/ttl, base src port %d and with the port span of %d\n", *probeRate, *baseSrcPort, *maxSrcPorts)
+	fmt.Fprintf(os.Stderr, "Use '-logtostderr=true' cmd line option to see GLOG output\n")
+
+	// this will catch senders quitting - we have one sender per ttl
+	senderDone := make([]chan struct{}, *maxTTL)
+	for ttl := *minTTL; ttl <= *maxTTL; ttl++ {
+		senderDone[ttl-1] = make(chan struct{})
+		c, err := Sender(senderDone[ttl-1], source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue)
+		if err != nil {
+			glog.Errorf("Failed to start sender for ttl %d, %s", ttl, err)
+			if err.Error() == "operation not permitted" {
+				glog.Error(" -- are you running with the correct privileges?")
+			}
+			return
+		}
+		probes = append(probes, c)
+	}
+
+	// channel to tell receivers to stop
+	recvDone := make(chan struct{})
+
+	// collect ICMP unreachable messages for our probes
+	icmpResp, err := ICMPReceiver(recvDone, *addrFamily)
+	if err != nil {
+		return
+	}
+
+	// collect TCP RST's from the target
+	targetAddr, err := resolveName(target, *addrFamily)
+	tcpResp, err := TCPReceiver(recvDone, *addrFamily, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTTL)
+	if err != nil {
+		return
+	}
+
+	// add DNS name resolvers to the mix
+	var resolved []chan interface{}
+	unresolved := merge(tcpResp, icmpResp)
+
+	for i := 0; i < *numResolvers; i++ {
+		c, err := Resolver(unresolved)
+		if err != nil {
+			return
+		}
+		resolved = append(resolved, c)
+	}
+
+	// maps that store various counters per source port/ttl
+	// e..g sent, for every soruce port, contains vector
+	// of sent packets for each TTL
+	sent := make(map[int] /*src Port */ []int /* pkts sent */)
+	rcvd := make(map[int] /*src Port */ []int /* pkts rcvd */)
+	hops := make(map[int] /*src Port */ []string /* hop name */)
+
+	for srcPort := *baseSrcPort; srcPort < *baseSrcPort+*maxSrcPorts; srcPort++ {
+		sent[srcPort] = make([]int, *maxTTL)
+		rcvd[srcPort] = make([]int, *maxTTL)
+		hops[srcPort] = make([]string, *maxTTL)
+		//hops[srcPort][*maxTTL-1] = target
+
+		for i := 0; i < *maxTTL; i++ {
+			hops[srcPort][i] = "?"
+		}
+	}
+
+	// collect all probe specs emitted by senders
+	// once all senders terminate, tell receivers to quit too
+	go func() {
+		for val := range merge(probes...) {
+			probe := val.(Probe)
+			sent[probe.srcPort][probe.ttl-1]++
+		}
+		glog.V(2).Infoln("All senders finished!")
+		// give receivers time to catch up on in-flight data
+		time.Sleep(2 * time.Second)
+		// tell receivers to stop receiving
+		close(recvDone)
+	}()
+
+	// this store DNS names of all nodes that ever replied to us
+	var names []string
+
+	// src ports that changed their paths in process of tracing
+	var flappedPorts = make(map[int]bool)
+
+	lastClosed := *maxTTL
+	for val := range merge(resolved...) {
+		switch val.(type) {
+		case ICMPResponse:
+			resp := val.(ICMPResponse)
+			rcvd[resp.srcPort][resp.ttl-1]++
+			currName := hops[resp.srcPort][resp.ttl-1]
+			if currName != "?" && currName != resp.fromName {
+				glog.V(2).Infof("%d: Source port %d flapped at ttl %d from: %s to %s\n", time.Now().UnixNano()/(1000*1000), resp.srcPort, resp.ttl, currName, resp.fromName)
+				flappedPorts[resp.srcPort] = true
+			}
+			hops[resp.srcPort][resp.ttl-1] = resp.fromName
+			// accumulate all names for processing later
+			// XXX: we may have duplicates, which is OK,
+			// but not very efficient
+			names = append(names, resp.fromName)
+		case TCPResponse:
+			resp := val.(TCPResponse)
+			// stop all senders sending above this ttl, since they are not needed
+			// XXX: this is not always optimal, i.e. we may receive TCP RST for
+			// a port mapped to a short WAN path, and it would tell us to terminate
+			// probing at higher TTL, thus cutting visibility on "long" paths
+			// however, this mostly concerned that last few hops...
+			for i := resp.ttl; i < lastClosed; i++ {
+				close(senderDone[i])
+			}
+			// update the last closed ttl, so we don't double-close the channels
+			if resp.ttl < lastClosed {
+				lastClosed = resp.ttl
+			}
+			rcvd[resp.srcPort][resp.ttl-1]++
+			hops[resp.srcPort][resp.ttl-1] = target
+		}
+	}
+
+	for srcPort, hopVector := range hops {
+		for i := range hopVector {
+			// truncate lists once we hit the target name
+			if hopVector[i] == target && i < *maxTTL-1 {
+				sent[srcPort] = sent[srcPort][:i+1]
+				rcvd[srcPort] = rcvd[srcPort][:i+1]
+				hopVector = hopVector[:i+1]
+				break
+			}
+		}
+	}
+
+	if len(flappedPorts) > 0 {
+		glog.Infof("A total of %d ports out of %d changed their paths while tracing\n", len(flappedPorts), *maxSrcPorts)
+	}
+
+	lossyPathSent := make(map[int] /*src port */ []int)
+	lossyPathRcvd := make(map[int] /* src port */ []int)
+	lossyPathHops := make(map[int] /*src port*/ []string)
+
+	// process the accumulated data, find and output lossy paths
+	for port, sentVector := range sent {
+		if flappedPorts[port] {
+			continue
+		}
+		if rcvdVector, ok := rcvd[port]; ok {
+			norm, err := normalizeRcvd(sentVector, rcvdVector)
+
+			if err != nil {
+				glog.Errorf("Could not normalize %v / %v", rcvdVector, sentVector)
+				continue
+			}
+
+			if isLossy(norm) || *showAll {
+				hosts := make([]string, len(norm))
+				for i := range norm {
+					hosts[i] = hops[port][i]
+				}
+				lossyPathSent[port] = sentVector
+				lossyPathRcvd[port] = rcvdVector
+				lossyPathHops[port] = hosts
+			}
+		} else {
+			glog.Errorf("No responses received for port %d", port)
+		}
+	}
+
+	if len(lossyPathHops) > 0 {
+		if *jsonOutput {
+			printLossyPathsJSON(lossyPathSent, lossyPathRcvd, lossyPathHops, lastClosed+1)
+		} else {
+			printLossyPaths(lossyPathSent, lossyPathRcvd, lossyPathHops, *maxColumns, lastClosed+1)
+		}
+		return
+	}
+	glog.Infof("Did not find any faulty paths\n")
+}
 
 //
 // Discover the source address for pinging
@@ -47,7 +250,7 @@ var baseSrcPort = flag.Int("baseSrcPort", 32768, "The base source port to start 
 func getSourceAddr(af string, srcAddr string) (*net.IP, error) {
 
 	if srcAddr != "" {
-		addr, err := net.ResolveIPAddr(*addrFamily, srcAddr)
+		addr, err := net.ResolveIPAddr(af, srcAddr)
 		if err != nil {
 			return nil, err
 		}
@@ -575,205 +778,4 @@ func printLossyPathsJSON(sent, rcvd map[int] /* src port */ []int, hops map[int]
 		return
 	}
 	fmt.Fprintf(os.Stdout, "%s\n", b)
-}
-
-func main() {
-	flag.Parse()
-	if flag.Arg(0) == "" {
-		fmt.Fprintf(os.Stderr, "Must specify a target\n")
-		return
-	}
-	target := flag.Arg(0)
-
-	var probes []chan interface{}
-
-	numIters := int(*maxTime * *probeRate / *maxSrcPorts)
-
-	if numIters <= 1 {
-		fmt.Fprintf(os.Stderr, "Number of iterations too low, increase probe rate / run time or decrease src port range...\n")
-		return
-	}
-
-	source, err := getSourceAddr(*addrFamily, *srcAddr)
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could not identify a source address to trace from\n")
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "Starting fbtracert with %d probes per second/ttl, base src port %d and with the port span of %d\n", *probeRate, *baseSrcPort, *maxSrcPorts)
-	fmt.Fprintf(os.Stderr, "Use '-logtostderr=true' cmd line option to see GLOG output\n")
-
-	// this will catch senders quitting - we have one sender per ttl
-	senderDone := make([]chan struct{}, *maxTTL)
-	for ttl := *minTTL; ttl <= *maxTTL; ttl++ {
-		senderDone[ttl-1] = make(chan struct{})
-		c, err := Sender(senderDone[ttl-1], source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue)
-		if err != nil {
-			glog.Errorf("Failed to start sender for ttl %d, %s", ttl, err);
-			if err.Error() == "operation not permitted" {
-				glog.Error(" -- are you running with the correct privileges?")
-			}
-			return
-		}
-		probes = append(probes, c)
-	}
-
-	// channel to tell receivers to stop
-	recvDone := make(chan struct{})
-
-	// collect ICMP unreachable messages for our probes
-	icmpResp, err := ICMPReceiver(recvDone, *addrFamily)
-	if err != nil {
-		return
-	}
-
-	// collect TCP RST's from the target
-	targetAddr, err := resolveName(target, *addrFamily)
-	tcpResp, err := TCPReceiver(recvDone, *addrFamily, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTTL)
-	if err != nil {
-		return
-	}
-
-	// add DNS name resolvers to the mix
-	var resolved []chan interface{}
-	unresolved := merge(tcpResp, icmpResp)
-
-	for i := 0; i < *numResolvers; i++ {
-		c, err := Resolver(unresolved)
-		if err != nil {
-			return
-		}
-		resolved = append(resolved, c)
-	}
-
-	// maps that store various counters per source port/ttl
-	// e..g sent, for every soruce port, contains vector
-	// of sent packets for each TTL
-	sent := make(map[int] /*src Port */ []int /* pkts sent */)
-	rcvd := make(map[int] /*src Port */ []int /* pkts rcvd */)
-	hops := make(map[int] /*src Port */ []string /* hop name */)
-
-	for srcPort := *baseSrcPort; srcPort < *baseSrcPort+*maxSrcPorts; srcPort++ {
-		sent[srcPort] = make([]int, *maxTTL)
-		rcvd[srcPort] = make([]int, *maxTTL)
-		hops[srcPort] = make([]string, *maxTTL)
-		//hops[srcPort][*maxTTL-1] = target
-
-		for i := 0; i < *maxTTL; i++ {
-			hops[srcPort][i] = "?"
-		}
-	}
-
-	// collect all probe specs emitted by senders
-	// once all senders terminate, tell receivers to quit too
-	go func() {
-		for val := range merge(probes...) {
-			probe := val.(Probe)
-			sent[probe.srcPort][probe.ttl-1]++
-		}
-		glog.V(2).Infoln("All senders finished!")
-		// give receivers time to catch up on in-flight data
-		time.Sleep(2 * time.Second)
-		// tell receivers to stop receiving
-		close(recvDone)
-	}()
-
-	// this store DNS names of all nodes that ever replied to us
-	var names []string
-
-	// src ports that changed their paths in process of tracing
-	var flappedPorts = make(map[int]bool)
-
-	lastClosed := *maxTTL
-	for val := range merge(resolved...) {
-		switch val.(type) {
-		case ICMPResponse:
-			resp := val.(ICMPResponse)
-			rcvd[resp.srcPort][resp.ttl-1]++
-			currName := hops[resp.srcPort][resp.ttl-1]
-			if currName != "?" && currName != resp.fromName {
-				glog.V(2).Infof("%d: Source port %d flapped at ttl %d from: %s to %s\n", time.Now().UnixNano()/(1000*1000), resp.srcPort, resp.ttl, currName, resp.fromName)
-				flappedPorts[resp.srcPort] = true
-			}
-			hops[resp.srcPort][resp.ttl-1] = resp.fromName
-			// accumulate all names for processing later
-			// XXX: we may have duplicates, which is OK,
-			// but not very efficient
-			names = append(names, resp.fromName)
-		case TCPResponse:
-			resp := val.(TCPResponse)
-			// stop all senders sending above this ttl, since they are not needed
-			// XXX: this is not always optimal, i.e. we may receive TCP RST for
-			// a port mapped to a short WAN path, and it would tell us to terminate
-			// probing at higher TTL, thus cutting visibility on "long" paths
-			// however, this mostly concerned that last few hops...
-			for i := resp.ttl; i < lastClosed; i++ {
-				close(senderDone[i])
-			}
-			// update the last closed ttl, so we don't double-close the channels
-			if resp.ttl < lastClosed {
-				lastClosed = resp.ttl
-			}
-			rcvd[resp.srcPort][resp.ttl-1]++
-			hops[resp.srcPort][resp.ttl-1] = target
-		}
-	}
-
-	for srcPort, hopVector := range hops {
-		for i := range hopVector {
-			// truncate lists once we hit the target name
-			if hopVector[i] == target && i < *maxTTL-1 {
-				sent[srcPort] = sent[srcPort][:i+1]
-				rcvd[srcPort] = rcvd[srcPort][:i+1]
-				hopVector = hopVector[:i+1]
-				break
-			}
-		}
-	}
-
-	if len(flappedPorts) > 0 {
-		glog.Infof("A total of %d ports out of %d changed their paths while tracing\n", len(flappedPorts), *maxSrcPorts)
-	}
-
-	lossyPathSent := make(map[int] /*src port */ []int)
-	lossyPathRcvd := make(map[int] /* src port */ []int)
-	lossyPathHops := make(map[int] /*src port*/ []string)
-
-	// process the accumulated data, find and output lossy paths
-	for port, sentVector := range sent {
-		if flappedPorts[port] {
-			continue
-		}
-		if rcvdVector, ok := rcvd[port]; ok {
-			norm, err := normalizeRcvd(sentVector, rcvdVector)
-
-			if err != nil {
-				glog.Errorf("Could not normalize %v / %v", rcvdVector, sentVector)
-				continue
-			}
-
-			if isLossy(norm) || *showAll {
-				hosts := make([]string, len(norm))
-				for i := range norm {
-					hosts[i] = hops[port][i]
-				}
-				lossyPathSent[port] = sentVector
-				lossyPathRcvd[port] = rcvdVector
-				lossyPathHops[port] = hosts
-			}
-		} else {
-			glog.Errorf("No responses received for port %d", port)
-		}
-	}
-
-	if len(lossyPathHops) > 0 {
-		if *jsonOutput {
-			printLossyPathsJSON(lossyPathSent, lossyPathRcvd, lossyPathHops, lastClosed+1)
-		} else {
-			printLossyPaths(lossyPathSent, lossyPathRcvd, lossyPathHops, *maxColumns, lastClosed+1)
-		}
-		return
-	}
-	glog.Infof("Did not find any faulty paths\n")
 }
