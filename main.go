@@ -19,6 +19,9 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
+
 	"github.com/golang/glog"
 	"github.com/olekukonko/tablewriter"
 )
@@ -548,93 +551,53 @@ func Sender(done <-chan struct{}, srcAddr *net.IP, af, dest string, dstPort, bas
 		return nil, err
 	}
 
-	var sendSocket int
-
-	// create the socket
-	switch {
-	case af == "ip4":
-		sendSocket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
-	case af == "ip6":
-		sendSocket, err = syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
-	}
-
+	conn, err := net.ListenPacket(af+":6", srcAddr.String())
 	if err != nil {
 		return nil, err
 	}
 
-	// bind the socket
-	switch {
-	case af == "ip4":
-		var sockaddr [4]byte
-		copy(sockaddr[:], srcAddr.To4())
-		err = syscall.Bind(sendSocket, &syscall.SockaddrInet4{Port: 0, Addr: sockaddr})
-	case af == "ip6":
-		var sockaddr [16]byte
-		copy(sockaddr[:], srcAddr.To16())
-		err = syscall.Bind(sendSocket, &syscall.SockaddrInet6{Port: 0, Addr: sockaddr})
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	// set the ttl on the socket
-	switch {
-	case af == "ip4":
-		err = syscall.SetsockoptInt(sendSocket, syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
-	case af == "ip6":
-		err = syscall.SetsockoptInt(sendSocket, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	// set the tos on the socket
-	switch {
-	case af == "ip4":
-		err = syscall.SetsockoptInt(sendSocket, syscall.IPPROTO_IP, syscall.IP_TOS, tos)
-	case af == "ip6":
-		err = syscall.SetsockoptInt(sendSocket, syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, tos)
-	}
-
-	if err != nil {
-		return nil, err
+	switch af {
+	case "ip4":
+		conn := ipv4.NewPacketConn(conn)
+		if err != nil {
+			return nil, err
+		}
+		if err := conn.SetTTL(ttl); err != nil {
+			return nil, err
+		}
+		if err := conn.SetTOS(tos); err != nil {
+			return nil, err
+		}
+	case "ip6":
+		conn := ipv6.NewPacketConn(conn)
+		if err := conn.SetHopLimit(ttl); err != nil {
+			return nil, err
+		}
+		if err := conn.SetTrafficClass(tos); err != nil {
+			return nil, err
+		}
 	}
 
 	// spawn a new goroutine and return the channel to be used for reading
 	go func() {
-		defer syscall.Close(sendSocket)
+		defer conn.Close()
 		defer close(out)
 
 		delay := time.Duration(1000/pps) * time.Millisecond
 
 		for i := 0; i < maxSrcPorts*maxIters; i++ {
 			srcPort := baseSrcPort + i%maxSrcPorts
-			probe := Probe{srcPort: srcPort, ttl: ttl}
 			now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff
 			seqNum := ((uint32(ttl) & 0xff) << 24) | (now & 0x00ffffff)
 			packet := makeTCPHeader(af, srcAddr, dstAddr, srcPort, dstPort, seqNum)
 
-			switch {
-			case af == "ip4":
-				var sockaddr [4]byte
-				copy(sockaddr[:], dstAddr.To4())
-				err = syscall.Sendto(sendSocket, packet, 0, &syscall.SockaddrInet4{Port: 0, Addr: sockaddr})
-			case af == "ip6":
-				var sockaddr [16]byte
-				copy(sockaddr[:], dstAddr.To16())
-				// with IPv6 the dst port must be zero, otherwise the syscall fails
-				err = syscall.Sendto(sendSocket, packet, 0, &syscall.SockaddrInet6{Port: 0, Addr: sockaddr})
-			}
-
-			if err != nil {
+			if _, err := conn.WriteTo(packet, &net.IPAddr{IP: *dstAddr}); err != nil {
 				glog.Errorf("Error sending packet %s\n", err)
 				break
 			}
 
-			// grab time before blocking on send channel
-			start := time.Now()
+			probe := Probe{srcPort: srcPort, ttl: ttl}
+			start := time.Now() // grab time before blocking on send channel
 			select {
 			case out <- probe:
 				end := time.Now()
