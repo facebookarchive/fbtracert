@@ -312,82 +312,73 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 		return nil, err
 	}
 
-	ipHdrSize := 0
-	if af == "ip4" {
-		ipHdrSize = 20
-	}
-
 	// we'll be writing the TCPResponse structs to this channel
 	out := make(chan interface{})
 
-	// IP + TCP header, this channel is fed from the socket
-	recv := make(chan TCPResponse)
 	go func() {
 		const tcpHdrSize int = 20
+		defer conn.Close()
+		defer close(out)
+		ipHdrSize := 0
+		if af == "ip4" {
+			ipHdrSize = 20
+		}
 		packet := make([]byte, ipHdrSize+tcpHdrSize)
 
 		for {
-			n, from, err := conn.ReadFrom(packet)
-			// parent has closed the socket likely
-			if err != nil {
-				break
-			}
-
-			// IP + TCP header size
-			if n < ipHdrSize+tcpHdrSize {
-				continue
-			}
-
-			// is that from the target port we expect?
-			tcpHdr := parseTCPHeader(packet[ipHdrSize:n])
-			if int(tcpHdr.Source) != targetPort {
-				continue
-			}
-
-			// is that TCP RST TCP ACK?
-			if tcpHdr.Flags&RST != RST && tcpHdr.Flags&ACK != ACK {
-				continue
-			}
-
-			// is that from our target?
-			if from.String() != targetAddr {
-				continue
-			}
-
-			glog.V(4).Infof("Received TCP response message %d: %x\n", len(packet), packet)
-
-			// we extract the original TTL and timestamp from the ack number
-			ackNum := tcpHdr.AckNum - 1
-			ttl := int(ackNum >> 24)
-
-			if ttl > maxTTL || ttl < 1 {
-				continue
-			}
-
-			// recover the time-stamp from the ack #
-			ts := ackNum & 0x00ffffff
-			now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff
-
-			// received timestamp is higher than local time; it is possible
-			// that ts == now, since our clock resolution is coarse
-			if ts > now {
-				continue
-			}
-
-			recv <- TCPResponse{Probe: Probe{srcPort: int(tcpHdr.Destination), ttl: ttl}, rtt: now - ts}
-		}
-	}()
-
-	go func() {
-		defer conn.Close()
-		defer close(out)
-		for {
 			select {
-			case response := <-recv:
-				out <- response
 			case <-done:
 				glog.V(2).Infoln("TCPReceiver terminating...")
 				return
+			default:
+				conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+				n, from, err := conn.ReadFrom(packet)
+				if err != nil {
+					continue
+				}
+
+				// IP + TCP header size
+				if n < ipHdrSize+tcpHdrSize {
+					continue
+				}
+
+				// is that from the target port we expect?
+				tcpHdr := parseTCPHeader(packet[ipHdrSize:n])
+				if int(tcpHdr.Source) != targetPort {
+					continue
+				}
+
+				// is that TCP RST TCP ACK?
+				if tcpHdr.Flags&RST != RST && tcpHdr.Flags&ACK != ACK {
+					continue
+				}
+
+				// is that from our target?
+				if from.String() != targetAddr {
+					continue
+				}
+
+				glog.V(4).Infof("Received TCP response message %d: %x\n", len(packet), packet)
+
+				// we extract the original TTL and timestamp from the ack number
+				ackNum := tcpHdr.AckNum - 1
+				ttl := int(ackNum >> 24)
+
+				if ttl > maxTTL || ttl < 1 {
+					continue
+				}
+
+				// recover the time-stamp from the ack #
+				ts := ackNum & 0x00ffffff
+				now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff
+
+				// received timestamp is higher than local time; it is possible
+				// that ts == now, since our clock resolution is coarse
+				if ts > now {
+					continue
+				}
+
+				out <- TCPResponse{Probe: Probe{srcPort: int(tcpHdr.Destination), ttl: ttl}, rtt: now - ts}
 			}
 		}
 	}()
@@ -423,45 +414,42 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan interf
 
 	glog.V(2).Infoln("ICMPReceiver is starting...")
 
-	recv := make(chan interface{})
-
-	go func() {
-		// TODO: remove hardcode; 20 bytes for IP header, 8 bytes for ICMP header, 8 bytes for TCP header
-		packet := make([]byte, icmpHdrSize+innerIPHdrSize+tcpHdrSize)
-		for {
-			n, from, err := conn.ReadFrom(packet)
-			if err != nil {
-				break
-			}
-
-			// not ttl exceeded
-			if packet[0] != icmpMsgType || packet[1] != 0 {
-				continue
-			}
-
-			glog.V(4).Infof("Received ICMP response message %d: %x\n", n, packet[:n])
-
-			tcpHdr := parseTCPHeader(packet[icmpHdrSize+innerIPHdrSize : n])
-
-			ttl := int(tcpHdr.SeqNum) >> 24                               // extract ttl bits from the ISN
-			ts := tcpHdr.SeqNum & 0x00ffffff                              // extract the timestamp from the ISN
-			now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff // scale the current time
-			recv <- ICMPResponse{Probe: Probe{srcPort: int(tcpHdr.Source), ttl: ttl}, fromAddr: net.ParseIP(from.String()), rtt: now - ts}
-		}
-	}()
-
 	out := make(chan interface{})
+
 	go func() {
 		defer conn.Close()
 		defer close(out)
+		// TODO: remove hardcode; 20 bytes for IP header, 8 bytes for ICMP header, 8 bytes for TCP header
+		packet := make([]byte, icmpHdrSize+innerIPHdrSize+tcpHdrSize)
 		for {
 			select {
-			// read ICMP struct
-			case response := <-recv:
-				out <- response
 			case <-done:
-				glog.V(2).Infoln("ICMPReceiver done")
+				glog.V(2).Infoln("ICMPReceiver terminating...")
 				return
+			default:
+				conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+				n, from, err := conn.ReadFrom(packet)
+				if err != nil {
+					continue
+				}
+
+				if n < icmpHdrSize+innerIPHdrSize+tcpHdrSize {
+					continue
+				}
+
+				// not ttl exceeded
+				if packet[0] != icmpMsgType || packet[1] != 0 {
+					continue
+				}
+
+				glog.V(4).Infof("Received ICMP response message %d: %x\n", n, packet[:n])
+
+				tcpHdr := parseTCPHeader(packet[icmpHdrSize+innerIPHdrSize : n])
+
+				ttl := int(tcpHdr.SeqNum) >> 24                               // extract ttl bits from the ISN
+				ts := tcpHdr.SeqNum & 0x00ffffff                              // extract the timestamp from the ISN
+				now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff // scale the current time
+				out <- ICMPResponse{Probe: Probe{srcPort: int(tcpHdr.Source), ttl: ttl}, fromAddr: net.ParseIP(from.String()), rtt: now - ts}
 			}
 		}
 	}()
