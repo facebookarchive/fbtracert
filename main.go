@@ -16,9 +16,10 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"syscall"
+	"strconv"
 	"time"
 
+	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 
@@ -89,7 +90,7 @@ func main() {
 
 	// collect ICMP unreachable messages for our probes
 	recvDone := make(chan struct{}) // channel to tell receivers to stop
-	icmpResp, err := ICMPReceiver(recvDone, *addrFamily)
+	icmpResp, err := ICMPReceiver(recvDone, source, *addrFamily)
 	if err != nil {
 		return
 	}
@@ -289,7 +290,7 @@ type Probe struct {
 // ICMPResponse is emitted by ICMPReceiver
 type ICMPResponse struct {
 	Probe
-	fromAddr *net.IP
+	fromAddr net.IP
 	fromName string
 	rtt      uint32
 }
@@ -395,37 +396,27 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 }
 
 // ICMPReceiver runs on its own collecting ICMP responses until its explicitly told to stop
-func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
-	var recvSocket int
-	var err error
-	var outerIPHdrSize int
-	var innerIPHdrSize int
-	var icmpMsgType byte
-
+func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan interface{}, error) {
 	const (
 		icmpHdrSize int = 8
 		tcpHdrSize  int = 8
 	)
 
+	var innerIPHdrSize int
+	var icmpMsgType byte
+	var icmpProto int
 	switch {
 	case af == "ip4":
-		recvSocket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_ICMP)
-		// IPv4 raw socket always prepend the transport IPv4 header
-		outerIPHdrSize = 20
-		// the size of the original IPv4 header that was on the TCP packet sent out
-		innerIPHdrSize = 20
-		// hardcoded: time to live exceeded
-		icmpMsgType = 11
+		innerIPHdrSize = 20 // the size of the original IPv4 header that was on the TCP packet sent out
+		icmpMsgType = 11    // time to live exceeded
+		icmpProto = 1       // IPv4 ICMP proto number
 	case af == "ip6":
-		recvSocket, err = syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_ICMPV6)
-		// IPv6 raw socket does not prepend the original transport IPv6 header
-		outerIPHdrSize = 0
-		// this is the size of IPv6 header of the original TCP packet we used in the probes
-		innerIPHdrSize = 40
-		// time to live exceeded
-		icmpMsgType = 3
+		innerIPHdrSize = 40 // this is the size of IPv6 header of the original TCP packet we used in the probes
+		icmpMsgType = 3     // time to live exceeded
+		icmpProto = 58      // IPv6 ICMP proto number
 	}
 
+	conn, err := icmp.ListenPacket(af+":"+strconv.Itoa(icmpProto), srcAddr.String())
 	if err != nil {
 		return nil, err
 	}
@@ -436,46 +427,32 @@ func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 
 	go func() {
 		// TODO: remove hardcode; 20 bytes for IP header, 8 bytes for ICMP header, 8 bytes for TCP header
-		packet := make([]byte, outerIPHdrSize+icmpHdrSize+innerIPHdrSize+tcpHdrSize)
+		packet := make([]byte, icmpHdrSize+innerIPHdrSize+tcpHdrSize)
 		for {
-			n, from, err := syscall.Recvfrom(recvSocket, packet, 0)
+			n, from, err := conn.ReadFrom(packet)
 			if err != nil {
 				break
 			}
-			// extract the 8 bytes of the original TCP header
-			if n < outerIPHdrSize+icmpHdrSize+innerIPHdrSize+tcpHdrSize {
-				continue
-			}
+
 			// not ttl exceeded
-			if packet[outerIPHdrSize] != icmpMsgType || packet[outerIPHdrSize+1] != 0 {
+			if packet[0] != icmpMsgType || packet[1] != 0 {
 				continue
 			}
-			glog.V(4).Infof("Received ICMP response message %d: %x\n", len(packet), packet)
-			tcpHdr := parseTCPHeader(packet[outerIPHdrSize+icmpHdrSize+innerIPHdrSize : n])
 
-			var fromAddr net.IP
+			glog.V(4).Infof("Received ICMP response message %d: %x\n", n, packet[:n])
 
-			switch {
-			case af == "ip4":
-				fromAddr = net.IP(from.(*syscall.SockaddrInet4).Addr[:])
-			case af == "ip6":
-				fromAddr = net.IP(from.(*syscall.SockaddrInet6).Addr[:])
-			}
+			tcpHdr := parseTCPHeader(packet[icmpHdrSize+innerIPHdrSize : n])
 
-			// extract ttl bits from the ISN
-			ttl := int(tcpHdr.SeqNum) >> 24
-
-			// extract the timestamp from the ISN
-			ts := tcpHdr.SeqNum & 0x00ffffff
-			// scale the current time
-			now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff
-			recv <- ICMPResponse{Probe: Probe{srcPort: int(tcpHdr.Source), ttl: ttl}, fromAddr: &fromAddr, rtt: now - ts}
+			ttl := int(tcpHdr.SeqNum) >> 24                               // extract ttl bits from the ISN
+			ts := tcpHdr.SeqNum & 0x00ffffff                              // extract the timestamp from the ISN
+			now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff // scale the current time
+			recv <- ICMPResponse{Probe: Probe{srcPort: int(tcpHdr.Source), ttl: ttl}, fromAddr: net.ParseIP(from.String()), rtt: now - ts}
 		}
 	}()
 
 	out := make(chan interface{})
 	go func() {
-		defer syscall.Close(recvSocket)
+		defer conn.Close()
 		defer close(out)
 		for {
 			select {
