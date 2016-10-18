@@ -96,7 +96,7 @@ func main() {
 
 	// collect TCP RST's from the target
 	targetAddr, err := resolveName(target, *addrFamily)
-	tcpResp, err := TCPReceiver(recvDone, *addrFamily, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTTL)
+	tcpResp, err := TCPReceiver(recvDone, source, *addrFamily, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTTL)
 	if err != nil {
 		return
 	}
@@ -302,29 +302,18 @@ type TCPResponse struct {
 
 // TCPReceiver Feeds on TCP RST messages we receive from the end host; we use lots of parameters to check if the incoming packet
 // is actually a response to our probe. We create TCPResponse structs and emit them on the output channel
-func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortStart, probePortEnd, targetPort, maxTTL int) (chan interface{}, error) {
-	var recvSocket int
-	var err error
-	var ipHdrSize int
+func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr string, probePortStart, probePortEnd, targetPort, maxTTL int) (chan interface{}, error) {
 
 	glog.V(2).Infoln("TCPReceiver starting...")
 
-	// create the socket
-	switch {
-	case af == "ip4":
-		recvSocket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
-		// IPv4 header is always included with the ipv4 raw socket receive
-		ipHdrSize = 20
-	case af == "ip6":
-		recvSocket, err = syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
-		// no IPv6 header present on TCP packets received on the raw socket
-		ipHdrSize = 0
-	default:
-		return nil, fmt.Errorf("Unknown address family supplied")
-	}
-
+	conn, err := net.ListenPacket(af+":6", srcAddr.String())
 	if err != nil {
 		return nil, err
+	}
+
+	ipHdrSize := 0
+	if af == "ip4" {
+		ipHdrSize = 20
 	}
 
 	// we'll be writing the TCPResponse structs to this channel
@@ -337,7 +326,7 @@ func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 		packet := make([]byte, ipHdrSize+tcpHdrSize)
 
 		for {
-			n, from, err := syscall.Recvfrom(recvSocket, packet, 0)
+			n, from, err := conn.ReadFrom(packet)
 			// parent has closed the socket likely
 			if err != nil {
 				break
@@ -359,19 +348,12 @@ func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 				continue
 			}
 
-			var fromAddrStr string
-
-			switch {
-			case af == "ip4":
-				fromAddrStr = net.IP((from.(*syscall.SockaddrInet4).Addr)[:]).String()
-			case af == "ip6":
-				fromAddrStr = net.IP((from.(*syscall.SockaddrInet6).Addr)[:]).String()
-			}
-
 			// is that from our target?
-			if fromAddrStr != targetAddr {
+			if from.String() != targetAddr {
 				continue
 			}
+
+			glog.V(4).Infof("Received TCP response message %d: %x\n", len(packet), packet)
 
 			// we extract the original TTL and timestamp from the ack number
 			ackNum := tcpHdr.AckNum - 1
@@ -396,7 +378,7 @@ func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 	}()
 
 	go func() {
-		defer syscall.Close(recvSocket)
+		defer conn.Close()
 		defer close(out)
 		for {
 			select {
