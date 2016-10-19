@@ -17,6 +17,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -346,6 +347,9 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 				conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 				n, from, err := conn.ReadFrom(packet)
 				if err != nil {
+					if !strings.Contains(err.Error(), "i/o timeout") {
+						glog.V(2).Infoln("tcpreceiver: error reading from network:", err)
+					}
 					continue
 				}
 
@@ -438,7 +442,9 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPRe
 				conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 				n, from, err := conn.ReadFrom(packet)
 				if err != nil {
-					glog.V(2).Infoln("icmpreceiver: error reading from network:", err)
+					if !strings.Contains(err.Error(), "i/o timeout") {
+						glog.V(2).Infoln("icmpreceiver: error reading from network:", err)
+					}
 					continue
 				}
 
