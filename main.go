@@ -30,9 +30,12 @@ import (
 )
 
 const (
-	icmpHdrSize   int = 8
-	minTCPHdrSize int = 8
-	maxTCPHdrSize int = 40
+	icmpHdrSize      int = 8
+	minTCPHdrSize    int = 20
+	maxTCPHdrSize    int = 60
+	minIP4HeaderSize int = 20
+	maxIP4HeaderSize int = 60
+	ip6HeaderSize    int = 40
 )
 
 func main() {
@@ -404,18 +407,18 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 
 // ICMPReceiver runs on its own collecting ICMP responses until its explicitly told to stop
 func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPResponse, error) {
-	var innerIPHdrSize int
+	var minInnerIPHdrSize int
 	var icmpMsgType byte
 	var listenNet string
 	switch af {
 	case "ip4":
-		innerIPHdrSize = 20 // the size of the original IPv4 header that was on the TCP packet sent out
-		icmpMsgType = 11    // time to live exceeded
-		listenNet = "ip4:1" // IPv4 ICMP proto number
+		minInnerIPHdrSize = minIP4HeaderSize // the size of the original IPv4 header that was on the TCP packet sent out
+		icmpMsgType = 11                     // time to live exceeded
+		listenNet = "ip4:1"                  // IPv4 ICMP proto number
 	case "ip6":
-		innerIPHdrSize = 40  // this is the size of IPv6 header of the original TCP packet we used in the probes
-		icmpMsgType = 3      // time to live exceeded
-		listenNet = "ip6:58" // IPv6 ICMP proto number
+		minInnerIPHdrSize = ip6HeaderSize // this is the size of IPv6 header of the original TCP packet we used in the probes
+		icmpMsgType = 3                   // time to live exceeded
+		listenNet = "ip6:58"              // IPv6 ICMP proto number
 	default:
 		return nil, fmt.Errorf("sender: unsupported network %q", af)
 	}
@@ -432,7 +435,7 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPRe
 	go func() {
 		defer conn.Close()
 		defer close(out)
-		packet := make([]byte, icmpHdrSize+innerIPHdrSize+maxTCPHdrSize)
+		packet := make([]byte, icmpHdrSize+maxIP4HeaderSize+maxTCPHdrSize)
 		for {
 			select {
 			case <-done:
@@ -448,7 +451,7 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPRe
 					continue
 				}
 
-				if n < icmpHdrSize+innerIPHdrSize+minTCPHdrSize {
+				if n < icmpHdrSize+minInnerIPHdrSize+minTCPHdrSize {
 					continue
 				}
 
@@ -459,7 +462,7 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPRe
 
 				glog.V(4).Infof("Received ICMP response message %d: %x\n", n, packet[:n])
 
-				tcpHdr := parseTCPHeader(packet[icmpHdrSize+innerIPHdrSize : n])
+				tcpHdr := parseTCPHeader(packet[icmpHdrSize+minInnerIPHdrSize : n])
 
 				ttl := int(tcpHdr.SeqNum) >> 24                               // extract ttl bits from the ISN
 				ts := tcpHdr.SeqNum & 0x00ffffff                              // extract the timestamp from the ISN
