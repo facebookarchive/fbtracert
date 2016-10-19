@@ -45,7 +45,7 @@ type TCPHeader struct {
 // create & serialize a TCP header, compute and fill in the checksum (v4/v6)
 //
 func makeTCPHeader(af string, srcAddr, dstAddr *net.IP, srcPort, dstPort int, ts uint32) []byte {
-	TCPHeader := TCPHeader{
+	tcpHeader := TCPHeader{
 		Source:      uint16(srcPort), // Random ephemeral port
 		Destination: uint16(dstPort),
 		SeqNum:      ts,
@@ -59,10 +59,10 @@ func makeTCPHeader(af string, srcAddr, dstAddr *net.IP, srcPort, dstPort int, ts
 	}
 
 	// temporary bytes for checksum
-	bytes := TCPHeader.Serialize()
-	TCPHeader.Checksum = tcpChecksum(af, bytes, srcAddr, dstAddr)
+	bytes := tcpHeader.Serialize()
+	tcpHeader.Checksum = tcpChecksum(af, bytes, srcAddr, dstAddr)
 
-	return TCPHeader.Serialize()
+	return tcpHeader.Serialize()
 }
 
 // Parse packet into TCPHeader structure
