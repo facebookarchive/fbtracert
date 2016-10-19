@@ -29,9 +29,11 @@ import (
 	"github.com/olekukonko/tablewriter"
 )
 
-//
-// Command line flags
-//
+const (
+	icmpHdrSize   int = 8
+	minTCPHdrSize int = 8
+	maxTCPHdrSize int = 40
+)
 
 func main() {
 	var (
@@ -328,14 +330,13 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 	out := make(chan TCPResponse)
 
 	go func() {
-		const tcpHdrSize int = 20
 		defer conn.Close()
 		defer close(out)
 		ipHdrSize := 0
 		if af == "ip4" {
 			ipHdrSize = 20
 		}
-		packet := make([]byte, ipHdrSize+tcpHdrSize)
+		packet := make([]byte, ipHdrSize+maxTCPHdrSize)
 
 		for {
 			select {
@@ -350,7 +351,7 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 				}
 
 				// IP + TCP header size
-				if n < ipHdrSize+tcpHdrSize {
+				if n < ipHdrSize+minTCPHdrSize {
 					continue
 				}
 
@@ -400,11 +401,6 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 
 // ICMPReceiver runs on its own collecting ICMP responses until its explicitly told to stop
 func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPResponse, error) {
-	const (
-		icmpHdrSize int = 8
-		tcpHdrSize  int = 8
-	)
-
 	var innerIPHdrSize int
 	var icmpMsgType byte
 	var icmpProto int
@@ -431,8 +427,7 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPRe
 	go func() {
 		defer conn.Close()
 		defer close(out)
-		// TODO: remove hardcode; 20 bytes for IP header, 8 bytes for ICMP header, 8 bytes for TCP header
-		packet := make([]byte, icmpHdrSize+innerIPHdrSize+tcpHdrSize)
+		packet := make([]byte, icmpHdrSize+innerIPHdrSize+maxTCPHdrSize)
 		for {
 			select {
 			case <-done:
@@ -442,10 +437,11 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPRe
 				conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 				n, from, err := conn.ReadFrom(packet)
 				if err != nil {
+					fmt.Println(err)
 					continue
 				}
 
-				if n < icmpHdrSize+innerIPHdrSize+tcpHdrSize {
+				if n < icmpHdrSize+innerIPHdrSize+minTCPHdrSize {
 					continue
 				}
 
