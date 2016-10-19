@@ -17,7 +17,6 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -321,7 +320,7 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 
 	glog.V(2).Infoln("TCPReceiver starting...")
 
-	conn, err := net.ListenPacket(af+":6", srcAddr.String())
+	conn, err := net.ListenPacket(af+":tcp", srcAddr.String())
 	if err != nil {
 		return nil, err
 	}
@@ -403,21 +402,21 @@ func TCPReceiver(done <-chan struct{}, srcAddr *net.IP, af string, targetAddr st
 func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPResponse, error) {
 	var innerIPHdrSize int
 	var icmpMsgType byte
-	var icmpProto int
-	switch {
-	case af == "ip4":
+	var listenNet string
+	switch af {
+	case "ip4":
 		innerIPHdrSize = 20 // the size of the original IPv4 header that was on the TCP packet sent out
 		icmpMsgType = 11    // time to live exceeded
-		icmpProto = 1       // IPv4 ICMP proto number
-	case af == "ip6":
-		innerIPHdrSize = 40 // this is the size of IPv6 header of the original TCP packet we used in the probes
-		icmpMsgType = 3     // time to live exceeded
-		icmpProto = 58      // IPv6 ICMP proto number
+		listenNet = "ip4:1" // IPv4 ICMP proto number
+	case "ip6":
+		innerIPHdrSize = 40  // this is the size of IPv6 header of the original TCP packet we used in the probes
+		icmpMsgType = 3      // time to live exceeded
+		listenNet = "ip6:58" // IPv6 ICMP proto number
 	default:
 		return nil, fmt.Errorf("sender: unsupported network %q", af)
 	}
 
-	conn, err := icmp.ListenPacket(af+":"+strconv.Itoa(icmpProto), srcAddr.String())
+	conn, err := icmp.ListenPacket(listenNet, srcAddr.String())
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +491,7 @@ func Sender(ctx context.Context, wg *sync.WaitGroup, srcAddr *net.IP, af, dest s
 		return err
 	}
 
-	conn, err := net.ListenPacket(af+":6", srcAddr.String())
+	conn, err := net.ListenPacket(af+":tcp", srcAddr.String())
 	if err != nil {
 		return err
 	}
