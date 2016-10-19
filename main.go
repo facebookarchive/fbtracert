@@ -413,6 +413,8 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPRe
 		innerIPHdrSize = 40 // this is the size of IPv6 header of the original TCP packet we used in the probes
 		icmpMsgType = 3     // time to live exceeded
 		icmpProto = 58      // IPv6 ICMP proto number
+	default:
+		return nil, fmt.Errorf("sender: unsupported network %q", af)
 	}
 
 	conn, err := icmp.ListenPacket(af+":"+strconv.Itoa(icmpProto), srcAddr.String())
@@ -437,7 +439,7 @@ func ICMPReceiver(done <-chan struct{}, srcAddr *net.IP, af string) (chan ICMPRe
 				conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 				n, from, err := conn.ReadFrom(packet)
 				if err != nil {
-					fmt.Println(err)
+					glog.V(2).Infoln("icmpreceiver: error reading from network:", err)
 					continue
 				}
 
@@ -515,6 +517,8 @@ func Sender(ctx context.Context, wg *sync.WaitGroup, srcAddr *net.IP, af, dest s
 		if err := conn.SetTrafficClass(tos); err != nil {
 			return err
 		}
+	default:
+		return fmt.Errorf("sender: unsupported network %q", af)
 	}
 
 	// spawn a new goroutine and return the channel to be used for reading
