@@ -141,29 +141,24 @@ func main() {
 		}
 	}
 
-	// collect all probe specs emitted by senders
-	// once all senders terminate, tell receivers to quit too
-	go func() {
-		for probe := range probes {
-			sent[probe.srcPort][probe.ttl-1]++
-		}
-		glog.V(2).Infoln("All senders finished!")
-		// give receivers time to catch up on in-flight data
-		time.Sleep(2 * time.Second)
-		// tell receivers to stop receiving
-		close(recvDone)
-	}()
-
-	// this store DNS names of all nodes that ever replied to us
-	var names []string
-
-	// src ports that changed their paths in process of tracing
-	var flappedPorts = make(map[int]bool)
-
+	var names []string                 // this store DNS names of all nodes that ever replied to us
+	flappedPorts := make(map[int]bool) // src ports that changed their paths in process of tracing
 	lastClosed := *maxTTL
+
 receiveLoop:
 	for {
 		select {
+		case probe, ok := <-probes:
+			if !ok {
+				// collect all probe specs emitted by senders
+				// once all senders terminate, tell receivers to quit too
+				probes = nil
+				glog.V(2).Infoln("All senders finished!")
+				// tell receivers to stop receiving
+				close(recvDone)
+				continue
+			}
+			sent[probe.srcPort][probe.ttl-1]++
 		case resp, ok := <-resolvedICMP:
 			if !ok {
 				resolvedICMP = nil
@@ -198,7 +193,7 @@ receiveLoop:
 			rcvd[resp.srcPort][resp.ttl-1]++
 			hops[resp.srcPort][resp.ttl-1] = target
 		default:
-			if resolvedICMP == nil && tcpResp == nil {
+			if resolvedICMP == nil && tcpResp == nil && probes == nil {
 				break receiveLoop
 			}
 		}
