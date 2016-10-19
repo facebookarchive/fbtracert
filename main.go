@@ -17,6 +17,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -521,6 +522,10 @@ func Sender(ctx context.Context, wg *sync.WaitGroup, srcAddr *net.IP, af, dest s
 		conn := ipv6.NewPacketConn(conn)
 		if err := conn.SetHopLimit(ttl); err != nil {
 			return err
+		}
+		if runtime.GOOS == "windows" {
+			glog.Infoln("Windows does not support setting IPv6 traffic class")
+			break
 		}
 		if err := conn.SetTrafficClass(tos); err != nil {
 			return err
