@@ -18,12 +18,12 @@ $GOPATH/bin/fbtracert --help
 
 ### Fault isolation in ECMP networks via multi-port traceroute
 
-This tools attempts to identify the network component that drops packets by employing the traceroute logic
+This tool attempts to identify the network component that drops packets by employing the traceroute logic
 that explores multiple parallel paths. The following describes the main goroutines and their logic.
 
 ### Sender
 
-We start this go-routine for every TTL that we expect on path to the destination. With start with some max TTL
+We start this goroutine for every TTL that we expect on path to the destination. We start with some max TTL
 value, and then stop all senders that have TTL above the distance to the target. For every TTL, the sender
 loops over a range of source ports, and emits a TCP SYN packet towards the destination with the set target port.
 The Sender also emits "Probe" objects on a special channel so that the analysis part may know what packets 
@@ -31,7 +31,7 @@ have been injected in the network (srcPort and Ttl).
 
 Notice how encode the sending time-stamp and the ttl in the ISN of the TCP SYN packet. This allows for measuring
 the probe RTT, and recoving the TTL of the response. Just like regular traceroute, we expect the network to return
-us either ICMP Unreachable message (TTL exceeded) or TCP RST message (when we hit the ultimate hop)
+us either ICMP Unreachable message (TTL exceeded) or TCP RST message (when we hit the ultimate hop).
 
 The Sender thread stops once it completes the requested number of iterations over the source port range.
 
@@ -47,10 +47,10 @@ goroutine ensemble. This is needed to resolve the IP address of the node that se
 
 ### TCP Receiver
 
-Similar to IcmpReceiver in logic, but this goroutine intercepts to TCP RST/ACK packets sent by the ultimate destinations of
+Similar to IcmpReceiver in logic, but this goroutine intercepts TCP RST/ACK packets sent by the ultimate destinations of
 our probes. These responses are processed and have TTL extracted, and then forwarded to the Resolver thread. We can
 work both with close ports (RST expect) and open ports (ACK expected). Be careful and make sure there are no open
-connections from your machine to the target on the port you are probing - this may confuse the hell of of TcpReceiver
+connections from your machine to the target on the port you are probing - this may confuse the hell out of TcpReceiver.
 
 ### Resolver
 
@@ -61,10 +61,10 @@ on the stream of messages.
 ### Main goroutine
 
 This one is responsible for starting all other goroutines, and then assembling their output. It is also responsible for
-terminated the unnecessary Senders. This is done by seeing what TTL hops actually return TCP RST messages; once we receive
+terminating the unnecessary Senders. This is done by seeing what TTL hops actually return TCP RST messages; once we receive
 TCP RST for TTL x, we can safely stop all senders for TTL > x
 
-The main loop expect to receive all "Probes" from the channels fed by the Sender goroutines. The Sender will close its
+The main loop expects to receive all "Probes" from the channels fed by the Sender goroutines. The Sender will close its
 output channels once its done sending. This serves as an indicator that all sending has completed. After that, we 
 wait a few more seconds all tell the TcpReceiver and IcmpReceiver to stop by closing their "signal" channel. 
 
