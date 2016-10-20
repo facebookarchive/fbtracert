@@ -44,7 +44,7 @@ type TCPHeader struct {
 //
 // create & serialize a TCP header, compute and fill in the checksum (v4/v6)
 //
-func makeTCPHeader(af string, srcAddr, dstAddr *net.IP, srcPort, dstPort int, ts uint32) []byte {
+func makeTCPHeader(af string, srcAddr, dstAddr net.IP, srcPort, dstPort int, ts uint32) []byte {
 	tcpHeader := TCPHeader{
 		Source:      uint16(srcPort), // Random ephemeral port
 		Destination: uint16(dstPort),
@@ -121,13 +121,13 @@ func (tcp *TCPHeader) Serialize() []byte {
 //
 // TCP Checksum, works for both v4 and v6 IP addresses
 //
-func tcpChecksum(af string, data []byte, srcip, dstip *net.IP) uint16 {
+func tcpChecksum(af string, data []byte, srcip, dstip net.IP) uint16 {
 
 	// the pseudo header used for TCP c-sum computation
 	var pseudoHeader []byte
 
-	pseudoHeader = append(pseudoHeader, *srcip...)
-	pseudoHeader = append(pseudoHeader, *dstip...)
+	pseudoHeader = append(pseudoHeader, srcip...)
+	pseudoHeader = append(pseudoHeader, dstip...)
 	switch {
 	case af == "ip4":
 		pseudoHeader = append(pseudoHeader, []byte{

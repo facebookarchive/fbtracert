@@ -16,11 +16,24 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"syscall"
+	"runtime"
 	"time"
+
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 
 	"github.com/golang/glog"
 	"github.com/olekukonko/tablewriter"
+)
+
+const (
+	icmpHdrSize      int = 8
+	minTCPHdrSize    int = 20
+	maxTCPHdrSize    int = 60
+	minIP4HeaderSize int = 20
+	maxIP4HeaderSize int = 60
+	ip6HeaderSize    int = 40
 )
 
 //
@@ -44,14 +57,14 @@ var baseSrcPort = flag.Int("baseSrcPort", 32768, "The base source port to start 
 //
 // Discover the source address for pinging
 //
-func getSourceAddr(af string, srcAddr string) (*net.IP, error) {
+func getSourceAddr(af string, srcAddr string) (net.IP, error) {
 
 	if srcAddr != "" {
 		addr, err := net.ResolveIPAddr(*addrFamily, srcAddr)
 		if err != nil {
 			return nil, err
 		}
-		return &addr.IP, nil
+		return addr.IP, nil
 	}
 
 	addrs, err := net.InterfaceAddrs()
@@ -61,7 +74,7 @@ func getSourceAddr(af string, srcAddr string) (*net.IP, error) {
 	for _, a := range addrs {
 		if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && !ipnet.IP.IsLinkLocalUnicast() {
 			if (ipnet.IP.To4() != nil && af == "ip4") || (ipnet.IP.To4() == nil && af == "ip6") {
-				return &ipnet.IP, nil
+				return ipnet.IP, nil
 			}
 		}
 	}
@@ -69,12 +82,12 @@ func getSourceAddr(af string, srcAddr string) (*net.IP, error) {
 }
 
 // Resolve given hostname/address in the given address family
-func resolveName(dest string, af string) (*net.IP, error) {
+func resolveName(dest string, af string) (net.IP, error) {
 	addr, err := net.ResolveIPAddr(af, dest)
 	if err != nil {
 		return nil, err
 	}
-	return &addr.IP, nil
+	return addr.IP, nil
 }
 
 // Probe is emitted by sender
@@ -86,7 +99,7 @@ type Probe struct {
 // ICMPResponse is emitted by ICMPReceiver
 type ICMPResponse struct {
 	Probe
-	fromAddr *net.IP
+	fromAddr net.IP
 	fromName string
 	rtt      uint32
 }
@@ -99,27 +112,10 @@ type TCPResponse struct {
 
 // TCPReceiver Feeds on TCP RST messages we receive from the end host; we use lots of parameters to check if the incoming packet
 // is actually a response to our probe. We create TCPResponse structs and emit them on the output channel
-func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortStart, probePortEnd, targetPort, maxTTL int) (chan interface{}, error) {
-	var recvSocket int
-	var err error
-	var ipHdrSize int
-
+func TCPReceiver(done <-chan struct{}, af string, srcAddr net.IP, targetAddr string, probePortStart, probePortEnd, targetPort, maxTTL int) (chan interface{}, error) {
 	glog.V(2).Infoln("TCPReceiver starting...")
 
-	// create the socket
-	switch {
-	case af == "ip4":
-		recvSocket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
-		// IPv4 header is always included with the ipv4 raw socket receive
-		ipHdrSize = 20
-	case af == "ip6":
-		recvSocket, err = syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
-		// no IPv6 header present on TCP packets received on the raw socket
-		ipHdrSize = 0
-	default:
-		return nil, fmt.Errorf("Unknown address family supplied")
-	}
-
+	conn, err := net.ListenPacket(af+":tcp", srcAddr.String())
 	if err != nil {
 		return nil, err
 	}
@@ -130,18 +126,20 @@ func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 	// IP + TCP header, this channel is fed from the socket
 	recv := make(chan TCPResponse)
 	go func() {
-		const tcpHdrSize int = 20
-		packet := make([]byte, ipHdrSize+tcpHdrSize)
+		ipHdrSize := 0
+		if af == "ip4" {
+			ipHdrSize = minIP4HeaderSize
+		}
+		packet := make([]byte, ipHdrSize+maxTCPHdrSize)
 
 		for {
-			n, from, err := syscall.Recvfrom(recvSocket, packet, 0)
-			// parent has closed the socket likely
+			n, from, err := conn.ReadFrom(packet)
 			if err != nil {
-				break
+				break // parent has closed the socket likely
 			}
 
 			// IP + TCP header size
-			if n < ipHdrSize+tcpHdrSize {
+			if n < ipHdrSize+minTCPHdrSize {
 				continue
 			}
 
@@ -156,19 +154,12 @@ func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 				continue
 			}
 
-			var fromAddrStr string
-
-			switch {
-			case af == "ip4":
-				fromAddrStr = net.IP((from.(*syscall.SockaddrInet4).Addr)[:]).String()
-			case af == "ip6":
-				fromAddrStr = net.IP((from.(*syscall.SockaddrInet6).Addr)[:]).String()
-			}
-
 			// is that from our target?
-			if fromAddrStr != targetAddr {
+			if from.String() != targetAddr {
 				continue
 			}
+
+			glog.V(4).Infof("Received TCP response message %d: %x\n", n, packet[:n])
 
 			// we extract the original TTL and timestamp from the ack number
 			ackNum := tcpHdr.AckNum - 1
@@ -193,7 +184,7 @@ func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 	}()
 
 	go func() {
-		defer syscall.Close(recvSocket)
+		defer conn.Close()
 		defer close(out)
 		for {
 			select {
@@ -210,37 +201,27 @@ func TCPReceiver(done <-chan struct{}, af string, targetAddr string, probePortSt
 }
 
 // ICMPReceiver runs on its own collecting ICMP responses until its explicitly told to stop
-func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
-	var recvSocket int
-	var err error
-	var outerIPHdrSize int
-	var innerIPHdrSize int
-	var icmpMsgType byte
-
-	const (
-		icmpHdrSize int = 8
-		tcpHdrSize  int = 8
+func ICMPReceiver(done <-chan struct{}, af string, srcAddr net.IP) (chan interface{}, error) {
+	var (
+		minInnerIPHdrSize int
+		icmpMsgType       byte
+		listenNet         string
 	)
 
-	switch {
-	case af == "ip4":
-		recvSocket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_ICMP)
-		// IPv4 raw socket always prepend the transport IPv4 header
-		outerIPHdrSize = 20
-		// the size of the original IPv4 header that was on the TCP packet sent out
-		innerIPHdrSize = 20
-		// hardcoded: time to live exceeded
-		icmpMsgType = 11
-	case af == "ip6":
-		recvSocket, err = syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_ICMPV6)
-		// IPv6 raw socket does not prepend the original transport IPv6 header
-		outerIPHdrSize = 0
-		// this is the size of IPv6 header of the original TCP packet we used in the probes
-		innerIPHdrSize = 40
-		// time to live exceeded
-		icmpMsgType = 3
+	switch af {
+	case "ip4":
+		minInnerIPHdrSize = minIP4HeaderSize // the size of the original IPv4 header that was on the TCP packet sent out
+		icmpMsgType = 11                     // time to live exceeded
+		listenNet = "ip4:1"                  // IPv4 ICMP proto number
+	case "ip6":
+		minInnerIPHdrSize = ip6HeaderSize // the size of the original IPv4 header that was on the TCP packet sent out
+		icmpMsgType = 3                   // time to live exceeded
+		listenNet = "ip6:58"              // IPv6 ICMP proto number
+	default:
+		return nil, fmt.Errorf("sender: unsupported network %q", af)
 	}
 
+	conn, err := icmp.ListenPacket(listenNet, srcAddr.String())
 	if err != nil {
 		return nil, err
 	}
@@ -251,31 +232,22 @@ func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 
 	go func() {
 		// TODO: remove hardcode; 20 bytes for IP header, 8 bytes for ICMP header, 8 bytes for TCP header
-		packet := make([]byte, outerIPHdrSize+icmpHdrSize+innerIPHdrSize+tcpHdrSize)
+		packet := make([]byte, icmpHdrSize+maxIP4HeaderSize+maxTCPHdrSize)
 		for {
-			n, from, err := syscall.Recvfrom(recvSocket, packet, 0)
+			n, from, err := conn.ReadFrom(packet)
 			if err != nil {
 				break
 			}
 			// extract the 8 bytes of the original TCP header
-			if n < outerIPHdrSize+icmpHdrSize+innerIPHdrSize+tcpHdrSize {
+			if n < icmpHdrSize+minInnerIPHdrSize+minTCPHdrSize {
 				continue
 			}
 			// not ttl exceeded
-			if packet[outerIPHdrSize] != icmpMsgType || packet[outerIPHdrSize+1] != 0 {
+			if packet[0] != icmpMsgType || packet[1] != 0 {
 				continue
 			}
-			glog.V(4).Infof("Received ICMP response message %d: %x\n", len(packet), packet)
-			tcpHdr := parseTCPHeader(packet[outerIPHdrSize+icmpHdrSize+innerIPHdrSize : n])
-
-			var fromAddr net.IP
-
-			switch {
-			case af == "ip4":
-				fromAddr = net.IP(from.(*syscall.SockaddrInet4).Addr[:])
-			case af == "ip6":
-				fromAddr = net.IP(from.(*syscall.SockaddrInet6).Addr[:])
-			}
+			glog.V(4).Infof("Received ICMP response message %d: %x\n", n, packet[:n])
+			tcpHdr := parseTCPHeader(packet[icmpHdrSize+minInnerIPHdrSize : n])
 
 			// extract ttl bits from the ISN
 			ttl := int(tcpHdr.SeqNum) >> 24
@@ -284,13 +256,13 @@ func ICMPReceiver(done <-chan struct{}, af string) (chan interface{}, error) {
 			ts := tcpHdr.SeqNum & 0x00ffffff
 			// scale the current time
 			now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff
-			recv <- ICMPResponse{Probe: Probe{srcPort: int(tcpHdr.Source), ttl: ttl}, fromAddr: &fromAddr, rtt: now - ts}
+			recv <- ICMPResponse{Probe: Probe{srcPort: int(tcpHdr.Source), ttl: ttl}, fromAddr: net.ParseIP(from.String()), rtt: now - ts}
 		}
 	}()
 
 	out := make(chan interface{})
 	go func() {
-		defer syscall.Close(recvSocket)
+		defer conn.Close()
 		defer close(out)
 		for {
 			select {
@@ -336,7 +308,7 @@ func Resolver(input chan interface{}) (chan interface{}, error) {
 // Sender generates TCP SYN packet probes with given TTL at given packet per second rate
 // The packet descriptions are published to the output channel as Probe messages
 // As a side effect, the packets are injected into raw socket
-func Sender(done <-chan struct{}, srcAddr *net.IP, af, dest string, dstPort, baseSrcPort, maxSrcPorts, maxIters, ttl, pps, tos int) (chan interface{}, error) {
+func Sender(done <-chan struct{}, srcAddr net.IP, af, dest string, dstPort, baseSrcPort, maxSrcPorts, maxIters, ttl, pps, tos int) (chan interface{}, error) {
 	var err error
 
 	out := make(chan interface{})
@@ -348,93 +320,56 @@ func Sender(done <-chan struct{}, srcAddr *net.IP, af, dest string, dstPort, bas
 		return nil, err
 	}
 
-	var sendSocket int
-
-	// create the socket
-	switch {
-	case af == "ip4":
-		sendSocket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
-	case af == "ip6":
-		sendSocket, err = syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
-	}
-
+	conn, err := net.ListenPacket(af+":tcp", srcAddr.String())
 	if err != nil {
 		return nil, err
 	}
 
-	// bind the socket
-	switch {
-	case af == "ip4":
-		var sockaddr [4]byte
-		copy(sockaddr[:], srcAddr.To4())
-		err = syscall.Bind(sendSocket, &syscall.SockaddrInet4{Port: 0, Addr: sockaddr})
-	case af == "ip6":
-		var sockaddr [16]byte
-		copy(sockaddr[:], srcAddr.To16())
-		err = syscall.Bind(sendSocket, &syscall.SockaddrInet6{Port: 0, Addr: sockaddr})
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	// set the ttl on the socket
-	switch {
-	case af == "ip4":
-		err = syscall.SetsockoptInt(sendSocket, syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
-	case af == "ip6":
-		err = syscall.SetsockoptInt(sendSocket, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	// set the tos on the socket
-	switch {
-	case af == "ip4":
-		err = syscall.SetsockoptInt(sendSocket, syscall.IPPROTO_IP, syscall.IP_TOS, tos)
-	case af == "ip6":
-		err = syscall.SetsockoptInt(sendSocket, syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, tos)
-	}
-
-	if err != nil {
-		return nil, err
+	switch af {
+	case "ip4":
+		conn := ipv4.NewPacketConn(conn)
+		if err := conn.SetTTL(ttl); err != nil {
+			return nil, err
+		}
+		if err := conn.SetTOS(tos); err != nil {
+			return nil, err
+		}
+	case "ip6":
+		conn := ipv6.NewPacketConn(conn)
+		if err := conn.SetHopLimit(ttl); err != nil {
+			return nil, err
+		}
+		if runtime.GOOS == "windows" {
+			glog.Infoln("Setting IPv6 traffic class not supported on Windows")
+			break
+		}
+		if err := conn.SetTrafficClass(tos); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("sender: unsupported network %q", af)
 	}
 
 	// spawn a new goroutine and return the channel to be used for reading
 	go func() {
-		defer syscall.Close(sendSocket)
+		defer conn.Close()
 		defer close(out)
 
 		delay := time.Duration(1000/pps) * time.Millisecond
 
 		for i := 0; i < maxSrcPorts*maxIters; i++ {
 			srcPort := baseSrcPort + i%maxSrcPorts
-			probe := Probe{srcPort: srcPort, ttl: ttl}
 			now := uint32(time.Now().UnixNano()/(1000*1000)) & 0x00ffffff
 			seqNum := ((uint32(ttl) & 0xff) << 24) | (now & 0x00ffffff)
 			packet := makeTCPHeader(af, srcAddr, dstAddr, srcPort, dstPort, seqNum)
 
-			switch {
-			case af == "ip4":
-				var sockaddr [4]byte
-				copy(sockaddr[:], dstAddr.To4())
-				err = syscall.Sendto(sendSocket, packet, 0, &syscall.SockaddrInet4{Port: 0, Addr: sockaddr})
-			case af == "ip6":
-				var sockaddr [16]byte
-				copy(sockaddr[:], dstAddr.To16())
-				// with IPv6 the dst port must be zero, otherwise the syscall fails
-				err = syscall.Sendto(sendSocket, packet, 0, &syscall.SockaddrInet6{Port: 0, Addr: sockaddr})
-			}
-
-			if err != nil {
+			if _, err := conn.WriteTo(packet, &net.IPAddr{IP: dstAddr}); err != nil {
 				glog.Errorf("Error sending packet %s\n", err)
 				break
 			}
 
-			// grab time before blocking on send channel
-			start := time.Now()
+			probe := Probe{srcPort: srcPort, ttl: ttl}
+			start := time.Now() // grab time before blocking on send channel
 			select {
 			case out <- probe:
 				end := time.Now()
@@ -612,7 +547,7 @@ func main() {
 		senderDone[ttl-1] = make(chan struct{})
 		c, err := Sender(senderDone[ttl-1], source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue)
 		if err != nil {
-			glog.Errorf("Failed to start sender for ttl %d, %s", ttl, err);
+			glog.Errorf("Failed to start sender for ttl %d, %s", ttl, err)
 			if err.Error() == "operation not permitted" {
 				glog.Error(" -- are you running with the correct privileges?")
 			}
@@ -625,14 +560,14 @@ func main() {
 	recvDone := make(chan struct{})
 
 	// collect ICMP unreachable messages for our probes
-	icmpResp, err := ICMPReceiver(recvDone, *addrFamily)
+	icmpResp, err := ICMPReceiver(recvDone, *addrFamily, source)
 	if err != nil {
 		return
 	}
 
 	// collect TCP RST's from the target
 	targetAddr, err := resolveName(target, *addrFamily)
-	tcpResp, err := TCPReceiver(recvDone, *addrFamily, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTTL)
+	tcpResp, err := TCPReceiver(recvDone, *addrFamily, source, targetAddr.String(), *baseSrcPort, *baseSrcPort+*maxSrcPorts, *targetPort, *maxTTL)
 	if err != nil {
 		return
 	}
