@@ -600,6 +600,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Could not identify a source address to trace from\n")
 		return
 	}
+	fmt.Fprintf(os.Stderr, "Using as source address: %s\n", source.String())
 
 	fmt.Fprintf(os.Stderr, "Starting fbtracert with %d probes per second/ttl, base src port %d and with the port span of %d\n", *probeRate, *baseSrcPort, *maxSrcPorts)
 	if flag.Lookup("logtostderr").Value.String() != "true" {
@@ -612,7 +613,7 @@ func main() {
 		senderDone[ttl-1] = make(chan struct{})
 		c, err := Sender(senderDone[ttl-1], source, *addrFamily, target, *targetPort, *baseSrcPort, *maxSrcPorts, numIters, ttl, *probeRate, *tosValue)
 		if err != nil {
-			glog.Errorf("Failed to start sender for ttl %d, %s", ttl, err);
+			glog.Errorf("Failed to start sender for ttl %d, %s", ttl, err)
 			if err.Error() == "operation not permitted" {
 				glog.Error(" -- are you running with the correct privileges?")
 			}
