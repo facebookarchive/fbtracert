@@ -126,8 +126,9 @@ func TCPReceiver(done <-chan struct{}, af string, srcAddr net.IP, targetAddr str
 	// IP + TCP header, this channel is fed from the socket
 	recv := make(chan TCPResponse)
 	go func() {
-		ipHdrSize := 0
+		ipHdrSize := 0 // no IPv6 header present on TCP packets received on the raw socket
 		if af == "ip4" {
+			// IPv4 header is always included with the ipv4 raw socket receive
 			ipHdrSize = minIP4HeaderSize
 		}
 		packet := make([]byte, ipHdrSize+maxTCPHdrSize)
