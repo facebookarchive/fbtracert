@@ -600,6 +600,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Could not identify a source address to trace from\n")
 		return
 	}
+    fmt.Fprintf(os.Stderr, "Using as source address: %s\n", source.String())
 
 	fmt.Fprintf(os.Stderr, "Starting fbtracert with %d probes per second/ttl, base src port %d and with the port span of %d\n", *probeRate, *baseSrcPort, *maxSrcPorts)
 	if flag.Lookup("logtostderr").Value.String() != "true" {
