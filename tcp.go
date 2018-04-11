@@ -128,14 +128,14 @@ func tcpChecksum(af string, data []byte, srcip, dstip net.IP) uint16 {
 
 	pseudoHeader = append(pseudoHeader, srcip...)
 	pseudoHeader = append(pseudoHeader, dstip...)
-	switch {
-	case af == "ip4":
+	switch af {
+	case "ip4":
 		pseudoHeader = append(pseudoHeader, []byte{
 			0,
 			6,                  // protocol number for TCP
 			0, byte(len(data)), // TCP length (16 bits), w/o pseudoheader
 		}...)
-	case af == "ip6":
+	case "ip6":
 		pseudoHeader = append(pseudoHeader, []byte{
 			0, 0, 0, byte(len(data)), // TCP length (32 bits), w/0 pseudoheader
 			0, 0, 0,
