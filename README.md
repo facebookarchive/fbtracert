@@ -71,3 +71,6 @@ wait a few more seconds all tell the TcpReceiver and IcmpReceiver to stop by clo
 After that, we process all data that the Receivers have fed to the main thread. We need to find the source ports
 whos' paths show consistent packet loss after a given hop N. We then output these paths as the "suspects" along with the
 counts of sent/received packets per hop.
+
+## License
+fbtracert is BSD licensed, as found in the LICENSE file.
