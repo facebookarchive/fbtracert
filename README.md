@@ -30,14 +30,14 @@ The Sender also emits "Probe" objects on a special channel so that the analysis 
 have been injected in the network (srcPort and Ttl).
 
 Notice how encode the sending time-stamp and the ttl in the ISN of the TCP SYN packet. This allows for measuring
-the probe RTT, and recoving the TTL of the response. Just like regular traceroute, we expect the network to return
+the probe RTT, and recovering the TTL of the response. Just like regular traceroute, we expect the network to return
 us either ICMP Unreachable message (TTL exceeded) or TCP RST message (when we hit the ultimate hop).
 
 The Sender thread stops once it completes the requested number of iterations over the source port range.
 
 ### ICMP Receiver
 
-We run only one ICMP receiver goroutine: it is responsible for receiving the ICMP Unrechable messages and recovering
+We run only one ICMP receiver goroutine: it is responsible for receiving the ICMP Unreachable messages and recovering
 the original probe information from them. We only use the first 8 bytes of the TCP packet embedded into ICMP Unreachable
 message, though in IPv6 case we could have more. This is sufficient anyways to recover the TTL and the timestamp of the
 original probe.
