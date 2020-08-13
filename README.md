@@ -1,4 +1,5 @@
 # fbtracert
+
 > pronounced: ef-BEE-tracerTEE
 
 ## Installing
@@ -27,7 +28,7 @@ We start this goroutine for every TTL that we expect on path to the destination.
 value, and then stop all senders that have TTL above the distance to the target. For every TTL, the sender
 loops over a range of source ports, and emits a TCP SYN packet towards the destination with the set target port.
 The Sender also emits "Probe" objects on a special channel so that the analysis part may know what packets 
-have been injected in the network (srcPort and Ttl).
+have been injected in the network (srcPort and TTL).
 
 Notice how encode the sending time-stamp and the ttl in the ISN of the TCP SYN packet. This allows for measuring
 the probe RTT, and recovering the TTL of the response. Just like regular traceroute, we expect the network to return
@@ -69,8 +70,8 @@ output channels once its done sending. This serves as an indicator that all send
 wait a few more seconds all tell the TcpReceiver and IcmpReceiver to stop by closing their "signal" channel. 
 
 After that, we process all data that the Receivers have fed to the main thread. We need to find the source ports
-whos' paths show consistent packet loss after a given hop N. We then output these paths as the "suspects" along with the
+whose paths show consistent packet loss after a given hop N. We then output these paths as the "suspects" along with the
 counts of sent/received packets per hop.
 
 ## License
-fbtracert is BSD licensed, as found in the LICENSE file.
+fbtracert is BSD licensed, as found in the [LICENSE](./LICENSE) file.
